@@ -28,10 +28,10 @@ a.d{color:var(--ac);font-weight:600}
 <body>
 <main>
 <h1>Editor Areas de Influencia</h1>
-<p>Cada PDF de entrada (vista general + capturas) se convierte en un PDF A3 con el plano montado. Todo se procesa en tu navegador: los archivos no se suben a ningún sitio.</p>
+<p>Cada PDF de entrada (vista general + capturas) se convierte en un PDF A3 con el plano montado. El localizador compara marcadores, detalles de casas y calles, y coincidencias entre capturas. Todo se procesa en tu navegador: los archivos no se suben a ningún sitio.</p>
 <div class="box">
 <div class="row"><label class="b">Elegir PDFs…<input id="fi" type="file" accept="application/pdf" multiple hidden></label><span id="nf" style="color:var(--mu)">Ningún PDF seleccionado</span></div>
-<label class="row" style="gap:8px"><input id="ug" type="checkbox" checked> Usar la vista general (página 1) como fondo, si el PDF la tiene</label>
+<label class="row" style="gap:8px"><input id="ug" type="checkbox" checked> Usar la vista general (página 1) como fondo, si el PDF la tiene</label><p style="font-size:13px">Consejo: las casas completas repetidas y las calles compartidas ayudan a localizar las capturas. Revisa las piezas que aparezcan como dudosas o no localizadas.</p>
 <div class="row"><button id="go" class="p" disabled>Crear PDFs A3</button><button id="zip" disabled>Descargar todo (ZIP)</button></div>
 <progress id="pg" value="0" max="1" hidden></progress>
 <p id="st">Cargando librerías (OpenCV.js pesa unos 10 MB, la primera vez tarda)…</p>
@@ -95,7 +95,7 @@ function regM(mp,mo,w,h,tol){
  for(let i=0;i<mp.length;i++)for(let j=i+1;j<mp.length;j++){const a=mp[i],b=mp[j],la=Math.hypot(b[0]-a[0],b[1]-a[1]);if(la<30)continue;
   for(let I=0;I<mo.length;I++)for(let J=0;J<mo.length;J++){const A=mo[I],B=mo[J];if(I===J||A[2]!==a[2]||B[2]!==b[2])continue;
    const lb=Math.hypot(B[0]-A[0],B[1]-A[1]),s=lb/la;if(!(s>.06&&s<1.5))continue;
-   let ang=Math.abs(Math.atan2(B[1]-A[1],B[0]-A[0])-Math.atan2(b[1]-a[1],b[0]-a[0]))*57.2958;if(Math.min(ang,360-ang)>3)continue;
+   let ang=Math.abs(Math.atan2(B[1]-A[1],B[0]-A[0])-Math.atan2(b[1]-a[1],b[0]-a[0]))*57.2958;if(Math.min(ang,360-ang)>4)continue;
    const tx=A[0]-s*a[0],ty=A[1]-s*a[1],good=[];
    mp.forEach((m,k)=>{const qx=s*m[0]+tx,qy=s*m[1]+ty;let bd=1e9,bO=-1;mo.forEach((o,O)=>{if(o[2]===m[2]){const dd=Math.hypot(qx-o[0],qy-o[1]);if(dd<bd){bd=dd;bO=O}}});
     if(bd<=tol*(lb<40?1.15:1))good.push([k,bO])});
@@ -110,30 +110,30 @@ function regM(mp,mo,w,h,tol){
  return best}
 
 /* ---------- coincidencias entre piezas (ORB de OpenCV.js + RANSAC propio) ---------- */
-function rasgos(c){const w=c.width,h=c.height,d=c.getContext('2d').getImageData(0,0,w,h).data,g=new Uint8Array(w*h);
+function rasgos(c){const w=c.width,h=c.height,d=c.getContext('2d',{willReadFrequently:true}).getImageData(0,0,w,h).data,g=new Uint8Array(w*h);
  for(let i=0,p=0;i<w*h;i++,p+=4){const a=d[p+3]/255,r=d[p]*a+255*(1-a),gg=d[p+1]*a+255*(1-a),b=d[p+2]*a+255*(1-a);
   g[i]=(r>180&&gg<90&&b<90)?255:.299*r+.587*gg+.114*b}
- const fs=Math.min(1,1800/Math.max(w,h)),m=new cv.Mat(h,w,cv.CV_8UC1),m2=new cv.Mat();m.data.set(g);
+ const fs=Math.min(1,2400/Math.max(w,h)),m=new cv.Mat(h,w,cv.CV_8UC1),m2=new cv.Mat();m.data.set(g);
  cv.resize(m,m2,new cv.Size(Math.round(w*fs),Math.round(h*fs)),0,0,cv.INTER_AREA);
- const orb=new cv.ORB(2500),kp=new cv.KeyPointVector(),des=new cv.Mat();orb.detectAndCompute(m2,new cv.Mat(),kp,des);
+ const orb=new cv.ORB(5000),kp=new cv.KeyPointVector(),des=new cv.Mat();orb.detectAndCompute(m2,new cv.Mat(),kp,des);
  const pts=[];for(let i=0;i<kp.size();i++){const k=kp.get(i);pts.push([k.pt.x/fs,k.pt.y/fs])}
  m.delete();m2.delete();orb.delete();kp.delete();return{pts,des}}
 function ransac(A,B){const N=A.length;let best=null;
- for(let it=0;it<1500;it++){const i=Math.random()*N|0,j=Math.random()*N|0;if(i===j)continue;
+ for(let it=0;it<3000;it++){const i=Math.random()*N|0,j=Math.random()*N|0;if(i===j)continue;
   const la=Math.hypot(A[j][0]-A[i][0],A[j][1]-A[i][1]),lb=Math.hypot(B[j][0]-B[i][0],B[j][1]-B[i][1]);if(la<20)continue;
   const s=lb/la;if(s<.05||s>20)continue;
-  let ang=Math.abs(Math.atan2(B[j][1]-B[i][1],B[j][0]-B[i][0])-Math.atan2(A[j][1]-A[i][1],A[j][0]-A[i][0]))*57.2958;if(Math.min(ang,360-ang)>3)continue;
+  let ang=Math.abs(Math.atan2(B[j][1]-B[i][1],B[j][0]-B[i][0])-Math.atan2(A[j][1]-A[i][1],A[j][0]-A[i][0]))*57.2958;if(Math.min(ang,360-ang)>4)continue;
   const x=B[i][0]-s*A[i][0],y=B[i][1]-s*A[i][1];let n=0;
-  for(let k=0;k<N;k++)if(Math.hypot(s*A[k][0]+x-B[k][0],s*A[k][1]+y-B[k][1])<3)n++;
+  for(let k=0;k<N;k++)if(Math.hypot(s*A[k][0]+x-B[k][0],s*A[k][1]+y-B[k][1])<4)n++;
   if(!best||n>best.n)best={s,x,y,n}}
  if(!best)return null;const sa=[],sb=[];
- for(let k=0;k<N;k++)if(Math.hypot(best.s*A[k][0]+best.x-B[k][0],best.s*A[k][1]+best.y-B[k][1])<3){sa.push(A[k]);sb.push(B[k])}
+ for(let k=0;k<N;k++)if(Math.hypot(best.s*A[k][0]+best.x-B[k][0],best.s*A[k][1]+best.y-B[k][1])<4){sa.push(A[k]);sb.push(B[k])}
  if(sa.length<4)return null;const T=fit(sa,sb);T.n=sa.length;return T}
 function enlace(fa,fb,minimo){
  if(fa.pts.length<8||fb.pts.length<8)return null;
  const bf=new cv.BFMatcher(cv.NORM_HAMMING,false),mv=new cv.DMatchVectorVector(),A=[],B=[];bf.knnMatch(fa.des,fb.des,mv,2);
  for(let i=0;i<mv.size();i++){const r=mv.get(i);if(r.size()<2)continue;const x=r.get(0),y=r.get(1);
-  if(x.distance<.8*y.distance){A.push(fa.pts[x.queryIdx]);B.push(fb.pts[x.trainIdx])}}
+  if(x.distance<.84*y.distance){A.push(fa.pts[x.queryIdx]);B.push(fb.pts[x.trainIdx])}}
  bf.delete();mv.delete();if(A.length<8)return null;
  const M=ransac(A,B);return(M&&M.n>=minimo&&M.s>.05&&M.s<20)?M:null}
 
@@ -154,7 +154,7 @@ async function montar(file,usarGeneral,log){
  let ab=piezas.map((p,k)=>regM(mps[k],mo,p.width,p.height,TOL));
  const sinG=!(ab.filter(a=>a&&a.s<.9).length>=Math.max(1,Math.ceil(n/2)));
  if(sinG){piezas=pgs;n=pgs.length;ref=null;usarGeneral=false;mps=piezas.map(marcadores);ab=piezas.map(()=>null);log('(sin vista general: se montan todas las páginas como piezas)')}
- log('Buscando coincidencias entre capturas…');await sleep();
+ log('Buscando coincidencias entre casas, calles y detalles del plano…');await sleep();
  const ft=[];for(const p of piezas){ft.push(rasgos(p));await sleep()}
  const edges=[];
  for(let a=0;a<n;a++)for(let b=a+1;b<n;b++){const e=enlace(ft[a],ft[b],8);if(!e||corr(piezas[a],piezas[b],e)<.45)continue;
@@ -188,7 +188,7 @@ async function montar(file,usarGeneral,log){
    rm=rm.concat(mg(r))}}
  const ok=[...Array(n).keys()].filter(k=>TR[k]),inf=[];
  for(let k=0;k<n;k++){const e=k+(sinG?1:2);
-  inf.push(!TR[k]?`pieza ${e}: NO localizada (sin coincidencias con las demás: ¿foto o escaneo?)`:ab[k]?`pieza ${e}: ${ab[k].n} marcadores coinciden`:`pieza ${e}: colocada por enlace con otra pieza${sinG?'':' (conviene revisarla)'}`)}
+  inf.push(!TR[k]?`pieza ${e}: NO localizada (sin coincidencias con las demás: ¿foto o escaneo?)`:ab[k]?`pieza ${e}: ${ab[k].n} marcadores coinciden`:`pieza ${e}: colocada por coincidencias visuales con otra pieza${sinG?'':' (conviene revisarla)'}`)}
  if(ok.length<Math.max(2,Math.floor((n+1)/2)+(n%2===0?1:0)))throw new Error(`No se pudo montar: solo se han podido ubicar ${ok.length} de ${n} páginas (¿son fotos, escaneos o formularios en vez de capturas?).`);
  /* lienzo */
  const Z=1/Math.min(...ok.map(k=>TR[k].s));let X0=1e9,Y0=1e9,X1=-1e9,Y1=-1e9;
