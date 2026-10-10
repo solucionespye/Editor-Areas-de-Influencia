@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Montador de puzzles A3</title>
+<style>
+:root{--bg:#f3f2f0;--pn:#fff;--fg:#1d1d22;--mu:#6b6b76;--bd:#d9d7d3;--ac:#c2188f;--acf:#fff;--ok:#1a7f45;--er:#c0392b}
+@media(prefers-color-scheme:dark){:root{--bg:#17171b;--pn:#212127;--fg:#ececf0;--mu:#9a9aa6;--bd:#34343c;--ac:#e24fb8;--acf:#17171b;--ok:#4cc38a;--er:#ff7b6b}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 "Segoe UI",system-ui,sans-serif;padding:24px}
+main{max-width:760px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+h1{margin:0;font-size:22px}p{margin:0;color:var(--mu)}
+.box{background:var(--pn);border:1px solid var(--bd);border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:10px}
+button,label.b{font:inherit;color:var(--fg);background:transparent;border:1px solid var(--bd);border-radius:6px;padding:8px 14px;cursor:pointer;text-align:center}
+button.p{background:var(--ac);color:var(--acf);border-color:var(--ac)}button:disabled{opacity:.45;cursor:default}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+progress{width:100%;accent-color:var(--ac)}
+#lg{max-height:340px;overflow:auto;font-size:13.5px;display:flex;flex-direction:column;gap:6px}
+.it{border-bottom:1px solid var(--bd);padding-bottom:6px}.ok{color:var(--ok)}.er{color:var(--er)}
+.it small{display:block;color:var(--mu);white-space:pre-wrap}
+a.d{color:var(--ac);font-weight:600}
+</style>
+</head>
+<body>
+<main>
+<h1>Montador de puzzles A3</h1>
+<p>Cada PDF de entrada (vista general + capturas) se convierte en un PDF A3 con el plano montado. Todo se procesa en tu navegador: los archivos no se suben a ningún sitio.</p>
+<div class="box">
+<div class="row"><label class="b">Elegir PDFs…<input id="fi" type="file" accept="application/pdf" multiple hidden></label><span id="nf" style="color:var(--mu)">Ningún PDF seleccionado</span></div>
+<label class="row" style="gap:8px"><input id="ug" type="checkbox" checked> Usar la vista general (página 1) como fondo, si el PDF la tiene</label>
+<div class="row"><button id="go" class="p" disabled>Crear PDFs A3</button><button id="zip" disabled>Descargar todo (ZIP)</button></div>
+<progress id="pg" value="0" max="1" hidden></progress>
+<p id="st">Cargando librerías (OpenCV.js pesa unos 10 MB, la primera vez tarda)…</p>
+</div>
+<div class="box" id="lg" hidden></div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script async src="https://docs.opencv.org/4.8.0/opencv.js"></script>
+<script>
+'use strict';
+const $=s=>document.querySelector(s), sleep=()=>new Promise(r=>setTimeout(r,0));
+pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const PX=300/72, TRIM={t:.035,b:.065,l:0,r:.015}, MAXPX=6000;
+let files=[], results=[];
+
+/* ---------- transformaciones p -> s*p + (x,y) ---------- */
+const ap=(T,p)=>[T.s*p[0]+T.x,T.s*p[1]+T.y];
+const comp=(a,b)=>({s:a.s*b.s,x:b.s*a.x+b.x,y:b.s*a.y+b.y});   // primero a, luego b
+const inv=a=>({s:1/a.s,x:-a.x/a.s,y:-a.y/a.s});
+function fit(src,dst){const n=src.length,ms=[0,0],md=[0,0];
+ src.forEach((p,i)=>{ms[0]+=p[0]/n;ms[1]+=p[1]/n;md[0]+=dst[i][0]/n;md[1]+=dst[i][1]/n});
+ let nu=0,de=0;src.forEach((p,i)=>{const a=p[0]-ms[0],b=p[1]-ms[1],c=dst[i][0]-md[0],d=dst[i][1]-md[1];nu+=a*c+b*d;de+=a*a+b*b});
+ const s=de>1e-9?nu/de:1;return{s,x:md[0]-s*ms[0],y:md[1]-s*ms[1]}}
+
+/* ---------- lectura de PDF: cada página -> canvas recortado a su contenido ---------- */
+async function paginas(file){
+ const pdf=await pdfjsLib.getDocument({data:new Uint8Array(await file.arrayBuffer())}).promise,out=[];
+ for(let i=1;i<=pdf.numPages;i++){
+  const pg=await pdf.getPage(i),vp=pg.getViewport({scale:PX}),c=document.createElement('canvas');
+  c.width=Math.ceil(vp.width);c.height=Math.ceil(vp.height);
+  const g=c.getContext('2d',{willReadFrequently:true});
+  await pg.render({canvasContext:g,viewport:vp,background:'rgba(0,0,0,0)'}).promise;
+  const tc=await pg.getTextContent();               // se borran los textos de cabecera de la página (no forman parte de la imagen)
+  for(const it of tc.items){const m=pdfjsLib.Util.transform(vp.transform,it.transform),h=Math.hypot(m[2],m[3]);g.clearRect(m[4]-3,m[5]-h*1.1,it.width*PX+6,h*1.5)}
+  const d=g.getImageData(0,0,c.width,c.height).data;let x0=1e9,y0=1e9,x1=-1,y1=-1;
+  for(let y=0;y<c.height;y++)for(let x=0;x<c.width;x++)if(d[(y*c.width+x)*4+3]>10){if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y}
+  if(x1<0)continue;
+  const o=document.createElement('canvas');o.width=x1-x0+1;o.height=y1-y0+1;
+  o.getContext('2d',{willReadFrequently:true}).drawImage(c,x0,y0,o.width,o.height,0,0,o.width,o.height);
+  out.push(o);await sleep()}
+ return out}
+
+/* ---------- marcadores (rombos cian y naranja) ---------- */
+function marcadores(c){const w=c.width,h=c.height,d=c.getContext('2d').getImageData(0,0,w,h).data,lab=new Uint8Array(w*h);
+ for(let i=0,p=0;i<w*h;i++,p+=4){const a=d[p+3]/255,r=d[p]*a+255*(1-a),g=d[p+1]*a+255*(1-a),b=d[p+2]*a+255*(1-a);
+  if(r<90&&g>180&&b>180)lab[i]=1;else if(r>200&&g>100&&g<190&&b<90)lab[i]=2}
+ const out=[],st=[];
+ for(let i=0;i<w*h;i++){const k=lab[i];if(!k)continue;let n=0,sx=0,sy=0;st.push(i);lab[i]=0;
+  while(st.length){const q=st.pop(),x=q%w,y=(q/w)|0;n++;sx+=x;sy+=y;
+   if(x>0&&lab[q-1]===k){lab[q-1]=0;st.push(q-1)}if(x<w-1&&lab[q+1]===k){lab[q+1]=0;st.push(q+1)}
+   if(y>0&&lab[q-w]===k){lab[q-w]=0;st.push(q-w)}if(y<h-1&&lab[q+w]===k){lab[q+w]=0;st.push(q+w)}}
+  if(n>=6)out.push([sx/n,sy/n,k===1?'c':'o',n])}
+ const mx={c:0,o:0};out.forEach(m=>{if(m[3]>mx[m[2]])mx[m[2]]=m[3]});
+ return out.filter(m=>m[3]>=.3*mx[m[2]])}
+
+function regM(mp,mo,w,h,tol){
+ if(mp.length<2||mo.length<2)return null;let best=null;
+ for(let i=0;i<mp.length;i++)for(let j=i+1;j<mp.length;j++){const a=mp[i],b=mp[j],la=Math.hypot(b[0]-a[0],b[1]-a[1]);if(la<30)continue;
+  for(let I=0;I<mo.length;I++)for(let J=0;J<mo.length;J++){const A=mo[I],B=mo[J];if(I===J||A[2]!==a[2]||B[2]!==b[2])continue;
+   const lb=Math.hypot(B[0]-A[0],B[1]-A[1]),s=lb/la;if(!(s>.06&&s<1.5))continue;
+   let ang=Math.abs(Math.atan2(B[1]-A[1],B[0]-A[0])-Math.atan2(b[1]-a[1],b[0]-a[0]))*57.2958;if(Math.min(ang,360-ang)>3)continue;
+   const tx=A[0]-s*a[0],ty=A[1]-s*a[1],good=[];
+   mp.forEach((m,k)=>{const qx=s*m[0]+tx,qy=s*m[1]+ty;let bd=1e9,bO=-1;mo.forEach((o,O)=>{if(o[2]===m[2]){const dd=Math.hypot(qx-o[0],qy-o[1]);if(dd<bd){bd=dd;bO=O}}});
+    if(bd<=tol*(lb<40?1.15:1))good.push([k,bO])});
+   if(good.length<2)continue;
+   const x1=s*w+tx,y1=s*h+ty,mx=.05*(x1-tx),my=.05*(y1-ty),used=new Set(good.map(g=>g[1]));
+   let falta=0;mo.forEach((o,O)=>{if(!used.has(O)&&o[0]>tx+mx&&o[0]<x1-mx&&o[1]>ty+my&&o[1]<y1-my)falta++});
+   const sc=good.length-.7*falta;
+   if(!best||sc>best.sc||(sc===best.sc&&good.length>best.n))best={sc,n:good.length,s,x:tx,y:ty,good}}}
+ if(!best)return null;
+ const T=fit(best.good.map(g=>mp[g[0]]),best.good.map(g=>mo[g[1]]));
+ if(best.n>=3||Math.abs(T.s/best.s-1)<.05){best.s=T.s;best.x=T.x;best.y=T.y}
+ return best}
+
+/* ---------- coincidencias entre piezas (ORB de OpenCV.js + RANSAC propio) ---------- */
+function rasgos(c){const w=c.width,h=c.height,d=c.getContext('2d').getImageData(0,0,w,h).data,g=new Uint8Array(w*h);
+ for(let i=0,p=0;i<w*h;i++,p+=4){const a=d[p+3]/255,r=d[p]*a+255*(1-a),gg=d[p+1]*a+255*(1-a),b=d[p+2]*a+255*(1-a);
+  g[i]=(r>180&&gg<90&&b<90)?255:.299*r+.587*gg+.114*b}
+ const fs=Math.min(1,1800/Math.max(w,h)),m=new cv.Mat(h,w,cv.CV_8UC1),m2=new cv.Mat();m.data.set(g);
+ cv.resize(m,m2,new cv.Size(Math.round(w*fs),Math.round(h*fs)),0,0,cv.INTER_AREA);
+ const orb=new cv.ORB(2500),kp=new cv.KeyPointVector(),des=new cv.Mat();orb.detectAndCompute(m2,new cv.Mat(),kp,des);
+ const pts=[];for(let i=0;i<kp.size();i++){const k=kp.get(i);pts.push([k.pt.x/fs,k.pt.y/fs])}
+ m.delete();m2.delete();orb.delete();kp.delete();return{pts,des}}
+function ransac(A,B){const N=A.length;let best=null;
+ for(let it=0;it<1500;it++){const i=Math.random()*N|0,j=Math.random()*N|0;if(i===j)continue;
+  const la=Math.hypot(A[j][0]-A[i][0],A[j][1]-A[i][1]),lb=Math.hypot(B[j][0]-B[i][0],B[j][1]-B[i][1]);if(la<20)continue;
+  const s=lb/la;if(s<.05||s>20)continue;
+  let ang=Math.abs(Math.atan2(B[j][1]-B[i][1],B[j][0]-B[i][0])-Math.atan2(A[j][1]-A[i][1],A[j][0]-A[i][0]))*57.2958;if(Math.min(ang,360-ang)>3)continue;
+  const x=B[i][0]-s*A[i][0],y=B[i][1]-s*A[i][1];let n=0;
+  for(let k=0;k<N;k++)if(Math.hypot(s*A[k][0]+x-B[k][0],s*A[k][1]+y-B[k][1])<3)n++;
+  if(!best||n>best.n)best={s,x,y,n}}
+ if(!best)return null;const sa=[],sb=[];
+ for(let k=0;k<N;k++)if(Math.hypot(best.s*A[k][0]+best.x-B[k][0],best.s*A[k][1]+best.y-B[k][1])<3){sa.push(A[k]);sb.push(B[k])}
+ if(sa.length<4)return null;const T=fit(sa,sb);T.n=sa.length;return T}
+function enlace(fa,fb,minimo){
+ if(fa.pts.length<8||fb.pts.length<8)return null;
+ const bf=new cv.BFMatcher(cv.NORM_HAMMING,false),mv=new cv.DMatchVectorVector(),A=[],B=[];bf.knnMatch(fa.des,fb.des,mv,2);
+ for(let i=0;i<mv.size();i++){const r=mv.get(i);if(r.size()<2)continue;const x=r.get(0),y=r.get(1);
+  if(x.distance<.8*y.distance){A.push(fa.pts[x.queryIdx]);B.push(fb.pts[x.trainIdx])}}
+ bf.delete();mv.delete();if(A.length<8)return null;
+ const M=ransac(A,B);return(M&&M.n>=minimo&&M.s>.05&&M.s<20)?M:null}
+
+function corr(a,b,e){const f=Math.min(1,500/Math.max(b.width,b.height)),W=Math.round(b.width*f),H=Math.round(b.height*f);
+ const cb=document.createElement('canvas');cb.width=W;cb.height=H;const gb=cb.getContext('2d',{willReadFrequently:true});gb.drawImage(b,0,0,W,H);
+ const ca=document.createElement('canvas');ca.width=W;ca.height=H;const ga=ca.getContext('2d',{willReadFrequently:true});ga.setTransform(e.s*f,0,0,e.s*f,e.x*f,e.y*f);ga.drawImage(a,0,0);
+ const A=ga.getImageData(0,0,W,H).data,B=gb.getImageData(0,0,W,H).data;let n=0,sa=0,sb=0,saa=0,sbb=0,sab=0;
+ for(let i=0;i<W*H;i++){const p=i*4;if(A[p+3]<250||B[p+3]<250)continue;const x=255-(A[p]+A[p+1]+A[p+2])/3,y=255-(B[p]+B[p+1]+B[p+2])/3;n++;sa+=x;sb+=y;saa+=x*x;sbb+=y*y;sab+=x*y}
+ if(n<500)return 0;const cov=sab/n-sa*sb/n/n,va=saa/n-sa*sa/n/n,vb=sbb/n-sb*sb/n/n;return cov/Math.sqrt(va*vb+1e-9)}
+
+/* ---------- montaje de un PDF ---------- */
+async function montar(file,usarGeneral,log){
+ let pgs=await paginas(file);if(pgs.length<2)throw new Error('El PDF necesita al menos 2 páginas.');
+ let ref=pgs[0],piezas=pgs.slice(1),n=piezas.length;
+ log('Detectando marcadores…');await sleep();
+ const mo=marcadores(ref);let mps=piezas.map(marcadores);
+ const areas=mo.map(m=>m[3]).sort((a,b)=>a-b),TOL=mo.length?Math.max(2.5,.8*Math.sqrt(areas[areas.length>>1])):4;
+ let ab=piezas.map((p,k)=>regM(mps[k],mo,p.width,p.height,TOL));
+ const sinG=!(ab.filter(a=>a&&a.s<.9).length>=Math.max(1,Math.ceil(n/2)));
+ if(sinG){piezas=pgs;n=pgs.length;ref=null;usarGeneral=false;mps=piezas.map(marcadores);ab=piezas.map(()=>null);log('(sin vista general: se montan todas las páginas como piezas)')}
+ log('Buscando coincidencias entre capturas…');await sleep();
+ const ft=[];for(const p of piezas){ft.push(rasgos(p));await sleep()}
+ const edges=[];
+ for(let a=0;a<n;a++)for(let b=a+1;b<n;b++){const e=enlace(ft[a],ft[b],8);if(!e||corr(piezas[a],piezas[b],e)<.45)continue;
+  if(ab[a]&&ab[b]&&Math.abs(e.s/(ab[a].s/ab[b].s)-1)>.06)continue;edges.push([a,b,e])}
+ await sleep();
+ if(sinG){const con=new Set(edges.map(e=>e[0]+','+e[1]));
+  for(let a=0;a<n;a++)for(let b=a+1;b<n;b++){if(con.has(a+','+b))continue;
+   const r=regM(mps[a],mps[b],piezas[a].width,piezas[a].height,4);if(r&&r.n>=3&&r.s>.9&&r.s<1.1)edges.push([a,b,{s:r.s,x:r.x,y:r.y,n:r.n}])}}
+ edges.sort((p,q)=>q[2].n-p[2].n);
+ const TR=ab.map(a=>a?{s:a.s,x:a.x,y:a.y}:null);
+ if(sinG){const gr=[...Array(n).keys()].map(k=>edges.filter(e=>e[0]===k||e[1]===k).length);TR[gr.indexOf(Math.max(...gr))]={s:1,x:0,y:0}}
+ for(let ch=true;ch;){ch=false;for(const[a,b,e]of edges){
+  if(TR[a]&&!TR[b]){TR[b]=comp(inv(e),TR[a]);ch=true}else if(TR[b]&&!TR[a]){TR[a]=comp(e,TR[b]);ch=true}}}
+ const par=[...Array(n).keys()],rt=x=>{while(par[x]!==x){par[x]=par[par[x]];x=par[x]}return x},ady=Array.from({length:n},()=>[]);
+ for(const[a,b,e]of edges){if(!TR[a]||!TR[b])continue;if(rt(a)!==rt(b)){par[rt(a)]=rt(b);ady[a].push([b,e,false]);ady[b].push([a,e,true])}}
+ const grupos={},vis=new Set();
+ for(let k=0;k<n;k++){if(vis.has(k)||!TR[k])continue;
+  const mem=[...Array(n).keys()].filter(x=>rt(x)===rt(k)),r0=mem.reduce((m,x)=>((ab[x]?ab[x].n:0)>(ab[m]?ab[m].n:0)?x:m),mem[0]);
+  grupos[r0]=[r0];vis.add(r0);const cola=[r0];
+  while(cola.length){const a=cola.pop();for(const[b,e,iv]of ady[a]){if(vis.has(b))continue;
+   TR[b]=iv?comp(e,TR[a]):comp(inv(e),TR[a]);vis.add(b);grupos[r0].push(b);cola.push(b)}}}
+ const orden=Object.keys(grupos).map(Number).sort((a,b)=>Math.min(...grupos[a].map(k=>TR[k].s))-Math.min(...grupos[b].map(k=>TR[k].s)));
+ const mg=r=>grupos[r].flatMap(k=>mps[k].map(m=>[...ap(TR[k],m),m[2]]));
+ if(orden.length){let rm=mg(orden[0]);
+  for(const r of orden.slice(1)){const pares=[],us=new Set();
+   for(const m of mg(r)){let bd=1e9,bi=-1;rm.forEach((o,i)=>{if(o[2]===m[2]){const d=Math.hypot(m[0]-o[0],m[1]-o[1]);if(d<bd){bd=d;bi=i}}});
+    if(bd<TOL&&!us.has(bi)){pares.push([m,rm[bi]]);us.add(bi)}}
+   if(pares.length>=2){const C=fit(pares.map(p=>p[0]),pares.map(p=>p[1]));if(Math.abs(C.s-1)<.05)for(const k of grupos[r])TR[k]=comp(TR[k],C)}
+   else if(pares.length===1){const dx=pares[0][1][0]-pares[0][0][0],dy=pares[0][1][1]-pares[0][0][1];
+    if(Math.abs(dx)<2*TOL&&Math.abs(dy)<2*TOL)for(const k of grupos[r])TR[k]=comp(TR[k],{s:1,x:dx,y:dy})}
+   rm=rm.concat(mg(r))}}
+ const ok=[...Array(n).keys()].filter(k=>TR[k]),inf=[];
+ for(let k=0;k<n;k++){const e=k+(sinG?1:2);
+  inf.push(!TR[k]?`pieza ${e}: NO localizada (sin coincidencias con las demás: ¿foto o escaneo?)`:ab[k]?`pieza ${e}: ${ab[k].n} marcadores coinciden`:`pieza ${e}: colocada por enlace con otra pieza${sinG?'':' (conviene revisarla)'}`)}
+ if(ok.length<Math.max(2,Math.floor((n+1)/2)+(n%2===0?1:0)))throw new Error(`No se pudo montar: solo se han podido ubicar ${ok.length} de ${n} páginas (¿son fotos, escaneos o formularios en vez de capturas?).`);
+ /* lienzo */
+ const Z=1/Math.min(...ok.map(k=>TR[k].s));let X0=1e9,Y0=1e9,X1=-1e9,Y1=-1e9;
+ const capas=ok.map(k=>({c:piezas[k],T:TR[k],g:true}));if(usarGeneral&&ref)capas.push({c:ref,T:{s:1,x:0,y:0},g:false});
+ for(const L of capas)for(const q of [[0,0],[L.c.width,0],[0,L.c.height],[L.c.width,L.c.height]]){const p=ap(L.T,q);X0=Math.min(X0,p[0]*Z);X1=Math.max(X1,p[0]*Z);Y0=Math.min(Y0,p[1]*Z);Y1=Math.max(Y1,p[1]*Z)}
+ const red=Math.min(1,MAXPX/Math.max(X1-X0,Y1-Y0)),out=document.createElement('canvas');out.width=Math.round((X1-X0)*red);out.height=Math.round((Y1-Y0)*red);
+ const g=out.getContext('2d');g.fillStyle='#fff';g.fillRect(0,0,out.width,out.height);g.imageSmoothingQuality='high';
+ capas.sort((a,b)=>b.T.s-a.T.s);                       // primero las menos nítidas, encima las de más resolución
+ for(const L of capas){const t=L.T,w=L.c.width,h=L.c.height,s=Z*red*t.s;
+  g.setTransform(s,0,0,s,Z*red*t.x-X0*red,Z*red*t.y-Y0*red);
+  const sx=L.g?w*TRIM.l:0,sy=L.g?h*TRIM.t:0,sw=w-sx-(L.g?w*TRIM.r:0),sh=h-sy-(L.g?h*TRIM.b:0);
+  g.drawImage(L.c,sx,sy,sw,sh,sx,sy,sw,sh)}
+ g.setTransform(1,0,0,1,0,0);
+ return{canvas:out,informe:inf,sin:inf.filter(l=>l.includes('NO localizada')).length}}
+
+/* ---------- A3 ---------- */
+function a3(canvas,titulo,nota){
+ const vert=canvas.height>canvas.width,pdf=new jspdf.jsPDF({orientation:vert?'p':'l',unit:'mm',format:'a3'}),
+  PW=vert?297:420,PH=vert?420:297,mg=10,cab=14;
+ pdf.setFontSize(16);pdf.text(titulo+(nota?'   '+nota:''),mg,mg+5);
+ const aw=PW-2*mg,ah=PH-2*mg-cab,k=Math.min(aw/canvas.width,ah/canvas.height),w=canvas.width*k,h=canvas.height*k;
+ pdf.addImage(canvas.toDataURL('image/jpeg',.93),'JPEG',mg+(aw-w)/2,mg+cab+(ah-h)/2,w,h);
+ return pdf.output('blob')}
+
+/* ---------- interfaz ---------- */
+function add(txt,cls,sub){const d=document.createElement('div');d.className='it';d.innerHTML=`<span class="${cls||''}"></span><small></small>`;
+ d.firstChild.textContent=txt;d.lastChild.textContent=sub||'';$('#lg').appendChild(d);$('#lg').hidden=false;return d}
+function descarga(blob,nombre){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=nombre;a.click()}
+$('#fi').onchange=e=>{files=[...e.target.files];$('#nf').textContent=files.length+' PDF seleccionados';$('#go').disabled=!window.cv||!cv.Mat||!files.length};
+$('#go').onclick=async()=>{
+ $('#go').disabled=true;$('#zip').disabled=true;results=[];$('#lg').innerHTML='';$('#pg').hidden=false;$('#pg').max=files.length;$('#pg').value=0;
+ for(let i=0;i<files.length;i++){const f=files[i],nombre=f.name.replace(/\.pdf$/i,''),it=add(f.name+' …','');let acc=[];
+  try{const r=await montar(f,$('#ug').checked,t=>{acc.push(t);$('#st').textContent=f.name+': '+t});
+   const blob=a3(r.canvas,nombre,r.sin?`(${r.sin} pieza(s) sin ubicar)`:'');results.push({n:nombre+'_A3.pdf',blob});
+   it.innerHTML='<span class="ok"></span> <a class="d" href="#"></a><small></small>';it.children[0].textContent='✔ ';
+   const a=it.querySelector('a');a.textContent=nombre+'_A3.pdf';a.onclick=ev=>{ev.preventDefault();descarga(blob,nombre+'_A3.pdf')};
+   it.querySelector('small').textContent=r.informe.join('\n')}
+  catch(e){it.firstChild.className='er';it.firstChild.textContent='✘ '+f.name+': '+e.message;console.error(e)}
+  $('#pg').value=i+1;await sleep()}
+ $('#st').textContent='Terminado.';$('#go').disabled=false;$('#zip').disabled=!results.length};
+$('#zip').onclick=async()=>{const z=new JSZip();results.forEach(r=>z.file(r.n,r.blob));descarga(await z.generateAsync({type:'blob'}),'puzzles_A3.zip')};
+(function esperarCv(){if(window.cv&&cv.Mat){$('#st').textContent='Listo. Elige los PDFs.';$('#go').disabled=!files.length}else setTimeout(esperarCv,300)})();
+</script>
+</body>
+</html>
