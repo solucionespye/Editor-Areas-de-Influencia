@@ -505,7 +505,7 @@ $('#go').onclick=async()=>{
   catch(e){it.firstChild.className='er';it.firstChild.textContent='✘ '+f.name+': '+e.message;console.error(e)}
   $('#pg').value=i+1;await sleep()}
  $('#st').textContent='Terminado.';$('#go').disabled=false;$('#zip').disabled=!results.some(Boolean)};
-$('#zip').onclick=async()=>{const z=new JSZip();results.forEach(r=>{if(r)z.file(r.n,r.blob)});descarga(await z.generateAsync({type:'blob'}),'puzzles_A3.zip')};
+$('#zip').onclick=async()=>{const z=new JSZip();results.forEach(r=>{if(r)z.file(r.n,r.blob)});descarga(await z.generateAsync({type:'blob'}),'Areas de INfluencia A3.zip')};
 (function esperarCv(){if(window.cv&&cv.Mat){$('#st').textContent='Listo. Elige los PDFs.';$('#go').disabled=!files.length}else setTimeout(esperarCv,300)})();
 </script>
 </body>
