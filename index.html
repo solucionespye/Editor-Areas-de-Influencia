@@ -423,7 +423,7 @@ async function montar(file,usarGeneral,log){
    for(const q of [[x0,y0],[x1,y0],[x0,y1],[x1,y1]]){const p=ap(L.T,q);X0=Math.min(X0,p[0]*Z);X1=Math.max(X1,p[0]*Z);Y0=Math.min(Y0,p[1]*Z);Y1=Math.max(Y1,p[1]*Z)}}
   const red=Math.min(1,MAXPX/Math.max(X1-X0,Y1-Y0)),out=document.createElement('canvas');out.width=Math.max(1,Math.round((X1-X0)*red));out.height=Math.max(1,Math.round((Y1-Y0)*red));
   const g=out.getContext('2d');g.fillStyle='#fff';g.fillRect(0,0,out.width,out.height);g.imageSmoothingQuality='high';
-  capas.sort((a,b)=>b.T.s-a.T.s);                       // primero las menos nítidas, encima las de más resolución
+  capas.sort((a,b)=>(a.g===b.g?0:a.g?1:-1)||b.T.s-a.T.s);   // la vista general siempre debajo                       // primero las menos nítidas, encima las de más resolución
   for(const L of capas){const t=L.T,s=Z*red*t.s,r=L.r;
    g.setTransform(s,0,0,s,Z*red*t.x-X0*red,Z*red*t.y-Y0*red);
    g.drawImage(L.c,r[0],r[1],r[2],r[3],r[0],r[1],r[2],r[3])}
