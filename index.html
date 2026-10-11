@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Editor Areas de Influencia</title>
+<title>Montador de puzzles A3</title>
 <link rel="icon" href="icono.svg" type="image/svg+xml">
 <link rel="alternate icon" href="favicon.ico">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -23,21 +23,32 @@ progress{width:100%;accent-color:var(--ac)}
 .it{border-bottom:1px solid var(--bd);padding-bottom:6px}.ok{color:var(--ok)}.er{color:var(--er)}
 .it small{display:block;color:var(--mu);white-space:pre-wrap}
 a.d{color:var(--ac);font-weight:600}
+.bt{margin-top:6px}
+dialog{max-width:96vw;background:var(--pn);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:16px}
+dialog canvas{width:46vw;max-width:46vw;height:auto;border:1px solid var(--bd);background:#fff;cursor:crosshair}
 </style>
 </head>
 <body>
 <main>
-<h1>Editor Areas de Influencia</h1>
-<p>Cada PDF de entrada (vista general + capturas) se convierte en un PDF A3 con el plano montado. El localizador compara marcadores, detalles de casas y calles, y coincidencias entre capturas. Todo se procesa en tu navegador: los archivos no se suben a ningún sitio.</p>
+<h1>Montador de puzzles A3</h1>
+<p>Cada PDF de entrada (vista general + capturas) se convierte en un PDF A3 con el plano montado. Todo se procesa en tu navegador: los archivos no se suben a ningún sitio.</p>
 <div class="box">
 <div class="row"><label class="b">Elegir PDFs…<input id="fi" type="file" accept="application/pdf" multiple hidden></label><span id="nf" style="color:var(--mu)">Ningún PDF seleccionado</span></div>
-<label class="row" style="gap:8px"><input id="ug" type="checkbox" checked> Usar la vista general (página 1) como fondo, si el PDF la tiene</label><p style="font-size:13px">Consejo: las casas completas repetidas y las calles compartidas ayudan a localizar las capturas. Revisa las piezas que aparezcan como dudosas o no localizadas.</p>
+<label class="row" style="gap:8px"><input id="ug" type="checkbox" checked> Usar la vista general (página 1) como fondo, si el PDF la tiene</label>
 <div class="row"><button id="go" class="p" disabled>Crear PDFs A3</button><button id="zip" disabled>Descargar todo (ZIP)</button></div>
 <progress id="pg" value="0" max="1" hidden></progress>
 <p id="st">Cargando librerías (OpenCV.js pesa unos 10 MB, la primera vez tarda)…</p>
 </div>
 <div class="box" id="lg" hidden></div>
 </main>
+<dialog id="dl">
+<div class="row" style="flex-direction:column;align-items:flex-start;gap:6px">
+<b id="dlt">Colocar a mano</b>
+<p>Pulsa <b>dos puntos que se vean iguales</b> en el plano montado (izquierda) y en la página suelta (derecha), en el mismo orden: por ejemplo dos esquinas de la misma parcela. Cuanto más separados estén, mejor encaja.</p>
+</div>
+<div class="row" style="flex-wrap:nowrap;align-items:flex-start;margin:10px 0"><canvas id="c1"></canvas><canvas id="c2"></canvas></div>
+<div class="row"><button id="dlok" class="p" disabled>Colocar</button><button id="dlre">Borrar puntos</button><button id="dlno">Cancelar</button><span id="dls" style="color:var(--mu)"></span></div>
+</dialog>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -49,6 +60,7 @@ const $=s=>document.querySelector(s), sleep=()=>new Promise(r=>setTimeout(r,0));
 pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 const PX=300/72, TRIM={t:.035,b:.065,l:0,r:.015}, MAXPX=6000;
 let files=[], results=[];
+let semilla=12345;const rnd=()=>{semilla=(semilla+0x6D2B79F5)|0;let t=Math.imul(semilla^semilla>>>15,1|semilla);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296};
 
 /* ---------- transformaciones p -> s*p + (x,y) ---------- */
 const ap=(T,p)=>[T.s*p[0]+T.x,T.s*p[1]+T.y];
@@ -61,21 +73,40 @@ function fit(src,dst){const n=src.length,ms=[0,0],md=[0,0];
 
 /* ---------- lectura de PDF: cada página -> canvas recortado a su contenido ---------- */
 async function paginas(file){
- const pdf=await pdfjsLib.getDocument({data:new Uint8Array(await file.arrayBuffer())}).promise,out=[];
+ const pdf=await pdfjsLib.getDocument({data:new Uint8Array(await file.arrayBuffer())}).promise,out=[];out.omitidas=0;
  for(let i=1;i<=pdf.numPages;i++){
-  const pg=await pdf.getPage(i),vp=pg.getViewport({scale:PX}),c=document.createElement('canvas');
+  const pg=await pdf.getPage(i),tc=await pg.getTextContent();
+  const txt=tc.items.map(t=>t.str).join(' ');
+  if(/REGISTRO DE CALLES|DIGI SPAIN|Viv\.\/Planta|Letras o n[uú]meros/i.test(txt)){out.omitidas++;continue}   // hoja de registro de calles u otra tabla: no es un plano
+  const vp=pg.getViewport({scale:PX}),c=document.createElement('canvas');
   c.width=Math.ceil(vp.width);c.height=Math.ceil(vp.height);
   const g=c.getContext('2d',{willReadFrequently:true});
   await pg.render({canvasContext:g,viewport:vp,background:'rgba(0,0,0,0)'}).promise;
-  const tc=await pg.getTextContent();               // se borran los textos de cabecera de la página (no forman parte de la imagen)
-  for(const it of tc.items){const m=pdfjsLib.Util.transform(vp.transform,it.transform),h=Math.hypot(m[2],m[3]);g.clearRect(m[4]-3,m[5]-h*1.1,it.width*PX+6,h*1.5)}
+  for(const it of tc.items){const m=pdfjsLib.Util.transform(vp.transform,it.transform),h=Math.hypot(m[2],m[3]);g.clearRect(m[4]-3,m[5]-h*1.1,it.width*PX+6,h*1.5)}   // se borran los textos de cabecera/pie (no forman parte de la imagen)
   const d=g.getImageData(0,0,c.width,c.height).data;let x0=1e9,y0=1e9,x1=-1,y1=-1;
   for(let y=0;y<c.height;y++)for(let x=0;x<c.width;x++)if(d[(y*c.width+x)*4+3]>10){if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y}
   if(x1<0)continue;
-  const o=document.createElement('canvas');o.width=x1-x0+1;o.height=y1-y0+1;
-  o.getContext('2d',{willReadFrequently:true}).drawImage(c,x0,y0,o.width,o.height,0,0,o.width,o.height);
-  out.push(o);await sleep()}
+  /* una página puede traer varias imágenes una al lado de otra (separadas por un hueco transparente): cada una se trata como una pieza */
+  const tinta=(x,y)=>{const p=(y*c.width+x)*4;return d[p+3]>10&&(d[p]<235||d[p+1]<235||d[p+2]<235)};
+  const col=new Uint16Array(c.width);for(let y=y0;y<=y1;y++)for(let x=x0;x<=x1;x++)if(tinta(x,y))col[x]++;
+  let segs=[],ini=-1,fin=-1,vacio=0;
+  for(let x=x0;x<=x1+1;x++){const on=x<=x1&&col[x]>=3;
+   if(on){if(ini<0)ini=x;fin=x;vacio=0}else if(ini>=0){vacio++;if(vacio>=40||x>x1){segs.push([ini,fin]);ini=-1;vacio=0}}}
+  const grandes=segs.filter(q=>q[1]-q[0]>=600);segs=grandes.length>1?grandes:[[x0,x1]];
+  segs.forEach((q,si)=>{let ya=y0,yb=y1;if(segs.length>1){ya=1e9;yb=-1;for(let y=y0;y<=y1;y++)for(let x=q[0];x<=q[1];x++)if(tinta(x,y)){if(y<ya)ya=y;if(y>yb)yb=y;break}}
+   const o=document.createElement('canvas');o.width=q[1]-q[0]+1;o.height=yb-ya+1;
+   o.getContext('2d',{willReadFrequently:true}).drawImage(c,q[0],ya,o.width,o.height,0,0,o.width,o.height);
+   o.pn=i;o.sub=si+1;o.nsub=segs.length;if(segs.length===1){o.pdf=pdf;o.crop=[x0,y0,x1,y1]}out.push(o)});
+  await sleep()}
  return out}
+
+/* vuelve a dibujar una página del PDF (vectorial) a mayor resolución, con el mismo recorte que tenía */
+async function redibujar(c,k){const pg=await c.pdf.getPage(c.pn),vp=pg.getViewport({scale:PX*k}),cv0=document.createElement('canvas');
+ cv0.width=Math.ceil(vp.width);cv0.height=Math.ceil(vp.height);const g=cv0.getContext('2d',{willReadFrequently:true});
+ await pg.render({canvasContext:g,viewport:vp,background:'rgba(0,0,0,0)'}).promise;
+ const tc=await pg.getTextContent();for(const it of tc.items){const m=pdfjsLib.Util.transform(vp.transform,it.transform),h=Math.hypot(m[2],m[3]);g.clearRect(m[4]-3*k,m[5]-h*1.1,it.width*PX*k+6*k,h*1.5)}
+ const[x0,y0,x1,y1]=c.crop,o=document.createElement('canvas');o.width=Math.round((x1-x0+1)*k);o.height=Math.round((y1-y0+1)*k);
+ o.getContext('2d',{willReadFrequently:true}).drawImage(cv0,Math.round(x0*k),Math.round(y0*k),o.width,o.height,0,0,o.width,o.height);return o}
 
 /* ---------- marcadores (rombos cian y naranja) ---------- */
 function marcadores(c){const w=c.width,h=c.height,d=c.getContext('2d').getImageData(0,0,w,h).data,lab=new Uint8Array(w*h);
@@ -95,7 +126,7 @@ function regM(mp,mo,w,h,tol){
  for(let i=0;i<mp.length;i++)for(let j=i+1;j<mp.length;j++){const a=mp[i],b=mp[j],la=Math.hypot(b[0]-a[0],b[1]-a[1]);if(la<30)continue;
   for(let I=0;I<mo.length;I++)for(let J=0;J<mo.length;J++){const A=mo[I],B=mo[J];if(I===J||A[2]!==a[2]||B[2]!==b[2])continue;
    const lb=Math.hypot(B[0]-A[0],B[1]-A[1]),s=lb/la;if(!(s>.06&&s<1.5))continue;
-   let ang=Math.abs(Math.atan2(B[1]-A[1],B[0]-A[0])-Math.atan2(b[1]-a[1],b[0]-a[0]))*57.2958;if(Math.min(ang,360-ang)>4)continue;
+   let ang=Math.abs(Math.atan2(B[1]-A[1],B[0]-A[0])-Math.atan2(b[1]-a[1],b[0]-a[0]))*57.2958;if(Math.min(ang,360-ang)>3)continue;
    const tx=A[0]-s*a[0],ty=A[1]-s*a[1],good=[];
    mp.forEach((m,k)=>{const qx=s*m[0]+tx,qy=s*m[1]+ty;let bd=1e9,bO=-1;mo.forEach((o,O)=>{if(o[2]===m[2]){const dd=Math.hypot(qx-o[0],qy-o[1]);if(dd<bd){bd=dd;bO=O}}});
     if(bd<=tol*(lb<40?1.15:1))good.push([k,bO])});
@@ -110,54 +141,191 @@ function regM(mp,mo,w,h,tol){
  return best}
 
 /* ---------- coincidencias entre piezas (ORB de OpenCV.js + RANSAC propio) ---------- */
-function rasgos(c){const w=c.width,h=c.height,d=c.getContext('2d',{willReadFrequently:true}).getImageData(0,0,w,h).data,g=new Uint8Array(w*h);
+function orbGray(g,w,h,k,sig){let m2=new cv.Mat();const f0=Math.min(1,1800/Math.max(w,h)),kk=Math.min(k,2600/(Math.max(w,h)*f0)),fs=f0*kk,
+ m=new cv.Mat(h,w,cv.CV_8UC1);m.data.set(g);
+ cv.resize(m,m2,new cv.Size(Math.max(16,Math.round(w*fs)),Math.max(16,Math.round(h*fs))),0,0,cv.INTER_AREA);
+ if(sig){const m3=new cv.Mat();cv.GaussianBlur(m2,m3,new cv.Size(0,0),sig);m2.delete();m2=m3}
+ const orb=new cv.ORB(2500),kp=new cv.KeyPointVector(),des=new cv.Mat(),mk=new cv.Mat();orb.detectAndCompute(m2,mk,kp,des);
+ const pts=[];for(let i=0;i<kp.size();i++){const q=kp.get(i);pts.push([q.pt.x/f0,q.pt.y/f0])}   // puntos en el marco de la página multiplicado por kk
+ m.delete();m2.delete();orb.delete();kp.delete();mk.delete();return{pts,des,k:kk}}
+function rasgos(c){const w=c.width,h=c.height,d=c.getContext('2d').getImageData(0,0,w,h).data,g=new Uint8Array(w*h);
  for(let i=0,p=0;i<w*h;i++,p+=4){const a=d[p+3]/255,r=d[p]*a+255*(1-a),gg=d[p+1]*a+255*(1-a),b=d[p+2]*a+255*(1-a);
   g[i]=(r>180&&gg<90&&b<90)?255:.299*r+.587*gg+.114*b}
- const fs=Math.min(1,2400/Math.max(w,h)),m=new cv.Mat(h,w,cv.CV_8UC1),m2=new cv.Mat();m.data.set(g);
- cv.resize(m,m2,new cv.Size(Math.round(w*fs),Math.round(h*fs)),0,0,cv.INTER_AREA);
- const orb=new cv.ORB(5000),kp=new cv.KeyPointVector(),des=new cv.Mat();orb.detectAndCompute(m2,new cv.Mat(),kp,des);
- const pts=[];for(let i=0;i<kp.size();i++){const k=kp.get(i);pts.push([k.pt.x/fs,k.pt.y/fs])}
- m.delete();m2.delete();orb.delete();kp.delete();return{pts,des}}
+ return orbGray(g,w,h,1,0)}
 function ransac(A,B){const N=A.length;let best=null;
- for(let it=0;it<3000;it++){const i=Math.random()*N|0,j=Math.random()*N|0;if(i===j)continue;
+ for(let it=0;it<1500;it++){const i=rnd()*N|0,j=rnd()*N|0;if(i===j)continue;
   const la=Math.hypot(A[j][0]-A[i][0],A[j][1]-A[i][1]),lb=Math.hypot(B[j][0]-B[i][0],B[j][1]-B[i][1]);if(la<20)continue;
   const s=lb/la;if(s<.05||s>20)continue;
-  let ang=Math.abs(Math.atan2(B[j][1]-B[i][1],B[j][0]-B[i][0])-Math.atan2(A[j][1]-A[i][1],A[j][0]-A[i][0]))*57.2958;if(Math.min(ang,360-ang)>4)continue;
+  let ang=Math.abs(Math.atan2(B[j][1]-B[i][1],B[j][0]-B[i][0])-Math.atan2(A[j][1]-A[i][1],A[j][0]-A[i][0]))*57.2958;if(Math.min(ang,360-ang)>3)continue;
   const x=B[i][0]-s*A[i][0],y=B[i][1]-s*A[i][1];let n=0;
-  for(let k=0;k<N;k++)if(Math.hypot(s*A[k][0]+x-B[k][0],s*A[k][1]+y-B[k][1])<4)n++;
+  for(let k=0;k<N;k++)if(Math.hypot(s*A[k][0]+x-B[k][0],s*A[k][1]+y-B[k][1])<3)n++;
   if(!best||n>best.n)best={s,x,y,n}}
  if(!best)return null;const sa=[],sb=[];
- for(let k=0;k<N;k++)if(Math.hypot(best.s*A[k][0]+best.x-B[k][0],best.s*A[k][1]+best.y-B[k][1])<4){sa.push(A[k]);sb.push(B[k])}
+ for(let k=0;k<N;k++)if(Math.hypot(best.s*A[k][0]+best.x-B[k][0],best.s*A[k][1]+best.y-B[k][1])<3){sa.push(A[k]);sb.push(B[k])}
  if(sa.length<4)return null;const T=fit(sa,sb);T.n=sa.length;return T}
 function enlace(fa,fb,minimo){
  if(fa.pts.length<8||fb.pts.length<8)return null;
  const bf=new cv.BFMatcher(cv.NORM_HAMMING,false),mv=new cv.DMatchVectorVector(),A=[],B=[];bf.knnMatch(fa.des,fb.des,mv,2);
  for(let i=0;i<mv.size();i++){const r=mv.get(i);if(r.size()<2)continue;const x=r.get(0),y=r.get(1);
-  if(x.distance<.84*y.distance){A.push(fa.pts[x.queryIdx]);B.push(fb.pts[x.trainIdx])}}
+  if(x.distance<.8*y.distance){A.push(fa.pts[x.queryIdx]);B.push(fb.pts[x.trainIdx])}}
  bf.delete();mv.delete();if(A.length<8)return null;
  const M=ransac(A,B);return(M&&M.n>=minimo&&M.s>.05&&M.s<20)?M:null}
 
-function corr(a,b,e){const f=Math.min(1,500/Math.max(b.width,b.height)),W=Math.round(b.width*f),H=Math.round(b.height*f);
+function boxblur(a,W,H,r){const t=new Float32Array(W*H),o=new Float32Array(W*H),k=2*r+1;
+ for(let y=0;y<H;y++){let s=0;const b=y*W;for(let x=-r;x<=r;x++)s+=a[b+Math.min(W-1,Math.max(0,x))];
+  for(let x=0;x<W;x++){t[b+x]=s/k;s+=a[b+Math.min(W-1,x+r+1)]-a[b+Math.max(0,x-r)]}}
+ for(let x=0;x<W;x++){let s=0;for(let y=-r;y<=r;y++)s+=t[Math.min(H-1,Math.max(0,y))*W+x];
+  for(let y=0;y<H;y++){o[y*W+x]=s/k;s+=t[Math.min(H-1,y+r+1)*W+x]-t[Math.max(0,y-r)*W+x]}}
+ return o}
+/* correlación entre dos páginas ya alineadas: solo cuenta donde ambas tienen dibujo cerca (las capturas tienen bordes blancos opacos) */
+function corr(a,b,e){const f=Math.min(1,450/Math.max(b.width,b.height)),W=Math.round(b.width*f),H=Math.round(b.height*f);
  const cb=document.createElement('canvas');cb.width=W;cb.height=H;const gb=cb.getContext('2d',{willReadFrequently:true});gb.drawImage(b,0,0,W,H);
  const ca=document.createElement('canvas');ca.width=W;ca.height=H;const ga=ca.getContext('2d',{willReadFrequently:true});ga.setTransform(e.s*f,0,0,e.s*f,e.x*f,e.y*f);ga.drawImage(a,0,0);
- const A=ga.getImageData(0,0,W,H).data,B=gb.getImageData(0,0,W,H).data;let n=0,sa=0,sb=0,saa=0,sbb=0,sab=0;
- for(let i=0;i<W*H;i++){const p=i*4;if(A[p+3]<250||B[p+3]<250)continue;const x=255-(A[p]+A[p+1]+A[p+2])/3,y=255-(B[p]+B[p+1]+B[p+2])/3;n++;sa+=x;sb+=y;saa+=x*x;sbb+=y*y;sab+=x*y}
- if(n<500)return 0;const cov=sab/n-sa*sb/n/n,va=saa/n-sa*sa/n/n,vb=sbb/n-sb*sb/n/n;return cov/Math.sqrt(va*vb+1e-9)}
+ const A=ga.getImageData(0,0,W,H).data,B=gb.getImageData(0,0,W,H).data,N=W*H,ia=new Float32Array(N),ib=new Float32Array(N),ov=new Uint8Array(N);let nov=0;
+ for(let i=0;i<N;i++){const p=i*4;if(A[p+3]<250||B[p+3]<250)continue;ov[i]=1;nov++;ia[i]=255-(A[p]+A[p+1]+A[p+2])/3;ib[i]=255-(B[p]+B[p+1]+B[p+2])/3}
+ if(nov<300)return{c:0,n:nov};
+ const da=boxblur(ia,W,H,10),db=boxblur(ib,W,H,10),sa=boxblur(ia,W,H,1),sb=boxblur(ib,W,H,1);
+ let n=0,Sa=0,Sb=0,Saa=0,Sbb=0,Sab=0;
+ for(let i=0;i<N;i++){if(!ov[i]||da[i]<1.5||db[i]<1.5)continue;const x=sa[i],y=sb[i];n++;Sa+=x;Sb+=y;Saa+=x*x;Sbb+=y*y;Sab+=x*y}
+ if(n<300)return{c:0,n};
+ const cov=Sab/n-Sa*Sb/n/n,va=Saa/n-Sa*Sa/n/n,vb=Sbb/n-Sb*Sb/n/n;return{c:cov/Math.sqrt(va*vb+1e-9),n}}
+
+/* ---------- versión del plano sin textos (solo líneas largas): sirve para localizar piezas que no enlazan por el método normal ---------- */
+/* rectángulo que contiene el dibujo de una página (sin los márgenes blancos opacos de la captura) */
+function cajaTinta(c){const w=c.width,h=c.height,d=c.getContext('2d').getImageData(0,0,w,h).data;let x0=w,y0=h,x1=-1,y1=-1;
+ for(let y=0;y<h;y++)for(let x=0;x<w;x++){const p=(y*w+x)*4;if(d[p+3]>10&&(d[p]<238||d[p+1]<238||d[p+2]<238)){if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y}}
+ return x1<0?[0,0,w,h]:[x0,y0,x1+1,y1+1]}
+const LMIN=90;
+function soloLineas(c){const w=c.width,h=c.height,d=c.getContext('2d').getImageData(0,0,w,h).data,N=w*h,t=new Uint8Array(N);
+ for(let i=0,p=0;i<N;i++,p+=4){const a=d[p+3]/255,r=d[p]*a+255*(1-a),g=d[p+1]*a+255*(1-a),b=d[p+2]*a+255*(1-a),mx=Math.max(r,g,b),mn=Math.min(r,g,b);
+  if(r>180&&g<90&&b<90)continue;if((r+g+b)/3<170||mx-mn>120)t[i]=1}
+ const out=new Uint8Array(N),st=new Int32Array(N),lista=[];
+ for(let i=0;i<N;i++){if(t[i]!==1)continue;let sp=0,x0=w,x1=0,y0=h,y1=0;st[sp++]=i;t[i]=2;lista.length=0;
+  while(sp){const q=st[--sp],x=q%w,y=(q/w)|0;lista.push(q);if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;
+   for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){const xx=x+dx,yy=y+dy;if(xx<0||yy<0||xx>=w||yy>=h)continue;const k=yy*w+xx;if(t[k]===1){t[k]=2;st[sp++]=k}}}
+  if(Math.max(x1-x0,y1-y0)>=LMIN)for(const q of lista)out[q]=255}
+ return{a:out,w,h}}
+function soloColor(c){const w=c.width,h=c.height,d=c.getContext('2d').getImageData(0,0,w,h).data,N=w*h,out=new Uint8Array(N);
+ for(let i=0,p=0;i<N;i++,p+=4){const a=d[p+3]/255,r=d[p]*a+255*(1-a),g=d[p+1]*a+255*(1-a),b=d[p+2]*a+255*(1-a);
+  if((r>190&&b>190&&g<120)||(b>200&&r<90&&g<90))out[i]=255}
+ return{a:out,w,h}}
+/* máscara de solo textos (lo que no son líneas largas, ni rojo/magenta) */
+function soloTexto(c){const w=c.width,h=c.height,d=c.getContext('2d').getImageData(0,0,w,h).data,L=soloLineas(c),o=new Uint8Array(w*h);
+ for(let i=0,p=0;i<w*h;i++,p+=4){if(L.a[i])continue;const a=d[p+3]/255,r=d[p]*a+255*(1-a),g=d[p+1]*a+255*(1-a),b=d[p+2]*a+255*(1-a);
+  if((r+g+b)/3<150&&Math.max(r,g,b)-Math.min(r,g,b)<60)o[i]=255}
+ return{a:o,w,h}}
+/* etiquetas (bloques de texto de una casa: calle, número…) de A que también aparecen en B con el mismo tamaño de letra.
+   Cada una da un punto común seguro aunque el zoom del plano sea distinto (las letras no escalan). Devuelve [[puntoEnA,puntoEnB,similitud]] */
+function etiquetasComunes(A,B){const m=new cv.Mat(A.h,A.w,cv.CV_8UC1);m.data.set(A.a);const dil=new cv.Mat();
+ cv.dilate(m,dil,cv.getStructuringElement(cv.MORPH_RECT,new cv.Size(25,15)));
+ const lab=new cv.Mat(),st=new cv.Mat(),cen=new cv.Mat(),nl=cv.connectedComponentsWithStats(dil,lab,st,cen);
+ const bm=new cv.Mat(B.h,B.w,cv.CV_8UC1);bm.data.set(B.a);const bb=new cv.Mat();cv.GaussianBlur(bm,bb,new cv.Size(0,0),1.2);
+ const am=new cv.Mat();cv.GaussianBlur(m,am,new cv.Size(0,0),1.2);const res=[];
+ for(let i=1;i<nl;i++){const x=st.intAt(i,0),y=st.intAt(i,1),w=st.intAt(i,2),h=st.intAt(i,3);if(w<60||h<35||w>600||h>400||w>=B.w||h>=B.h)continue;
+  const roi=am.roi(new cv.Rect(x,y,w,h)),r=new cv.Mat();cv.matchTemplate(bb,roi,r,cv.TM_CCOEFF_NORMED);
+  /* varios máximos por etiqueta: letras parecidas ("BOMBITA 1" / "BOMBITA 7") dan puntuaciones casi iguales y luego deciden las líneas */
+  for(let t=0;t<8;t++){const mm=cv.minMaxLoc(r);if(!(mm.maxVal>=.7))break;
+   res.push([[x+w/2,y+h/2],[mm.maxLoc.x+w/2,mm.maxLoc.y+h/2],mm.maxVal]);
+   const rx=Math.max(0,mm.maxLoc.x-w/2|0),ry=Math.max(0,mm.maxLoc.y-h/2|0),rw=Math.min(r.cols-rx,w),rh=Math.min(r.rows-ry,h);
+   if(rw>0&&rh>0){const z=r.roi(new cv.Rect(rx,ry,rw,rh));z.setTo(new cv.Scalar(0));z.delete()}}
+  roi.delete();r.delete()}
+ m.delete();dil.delete();lab.delete();st.delete();cen.delete();bm.delete();bb.delete();am.delete();
+ return res.sort((a,b)=>b[2]-a[2]).slice(0,30)}
+/* recinto cerrado de líneas (la casa) que rodea al punto pt: máscara recortada, área y centroide; null si se sale de la hoja o es absurdo */
+function recinto(L,pt){if(!L._cc){const m=new cv.Mat(L.h,L.w,cv.CV_8UC1);m.data.set(L.a);const d=new cv.Mat();cv.dilate(m,d,cv.getStructuringElement(cv.MORPH_RECT,new cv.Size(5,5)));m.delete();
+  cv.bitwise_not(d,d);const lab=new cv.Mat(),st=new cv.Mat(),cen=new cv.Mat();cv.connectedComponentsWithStats(d,lab,st,cen,4);d.delete();L._cc={lab,st,cen}}
+ const{lab,st,cen}=L._cc;
+ const px=Math.round(pt[0]),py=Math.round(pt[1]);let id=0,bd=1e9;
+ for(let dy=-20;dy<=20;dy++)for(let dx=-20;dx<=20;dx++){const x=px+dx,y=py+dy;if(x<0||y<0||x>=L.w||y>=L.h)continue;const v=lab.intAt(y,x);if(v>0){const q=dx*dx+dy*dy;if(q<bd){bd=q;id=v}}}
+ let out=null;
+ if(id){const x=st.intAt(id,0),y=st.intAt(id,1),w=st.intAt(id,2),h=st.intAt(id,3),ar=st.intAt(id,4);
+  if(x>0&&y>0&&x+w<L.w&&y+h<L.h&&ar>=1500&&ar<=.35*L.w*L.h){const a=new Uint8Array(w*h);
+   for(let yy=0;yy<h;yy++)for(let xx=0;xx<w;xx++)if(lab.intAt(y+yy,x+xx)===id)a[yy*w+xx]=255;
+   out={a,w,h,x0:x,y0:y,area:ar,cx:cen.doubleAt(id,0),cy:cen.doubleAt(id,1)}}}
+ return out}
+/* ¿es la misma casa? escala por el área, y se comprueba que la silueta coincide (IoU). Devuelve transformación pieza A -> pieza B */
+function mismaCasa(RA,RB){if(!RA||!RB)return null;const s0=Math.sqrt(RB.area/RA.area);if(s0<.2||s0>5)return null;
+ const mb=new cv.Mat(RB.h,RB.w,cv.CV_8UC1);mb.data.set(RB.a);const ma=new cv.Mat(RA.h,RA.w,cv.CV_8UC1);ma.data.set(RA.a);let best=null;
+ const cAx=RA.cx-RA.x0,cAy=RA.cy-RA.y0,cBx=RB.cx-RB.x0,cBy=RB.cy-RB.y0;
+ for(const f of [.94,.96,.98,1,1.02,1.04,1.06]){const s=s0*f,M=cv.matFromArray(2,3,cv.CV_64F,[s,0,cBx-s*cAx,0,s,cBy-s*cAy]),w=new cv.Mat();
+  cv.warpAffine(ma,w,M,new cv.Size(RB.w,RB.h),cv.INTER_LINEAR,cv.BORDER_CONSTANT,new cv.Scalar(0));
+  const wa=w.data,mbb=mb.data;let I=0,U=0;for(let i=0;i<wa.length;i++){const p=wa[i]>127,q=mbb[i]>127;if(p&&q)I++;if(p||q)U++}
+  /* lo que se sale de la ventana de B también cuenta como no coincidente */
+  const sa=RA.area*s*s,ex=Math.max(0,sa-(wa.length?[...[0]].length*0:0));const iou=I/Math.max(1,U+Math.max(0,sa-sumaW(wa)));
+  if(!best||iou>best.iou)best={iou,s,x:RB.cx-s*RA.cx,y:RB.cy-s*RA.cy};M.delete();w.delete()}
+ mb.delete();ma.delete();return best}
+function sumaW(a){let n=0;for(let i=0;i<a.length;i++)if(a[i]>127)n++;return n}
+/* todas las casas (recintos cerrados de líneas) de una pieza, con descriptores que no dependen del zoom: excentricidad, orientación y relleno */
+function regiones(L){recinto(L,[-1e6,-1e6]);const{lab,st,cen}=L._cc,w=L.w,h=L.h,N=st.rows,ac=new Map();
+ for(let i=1;i<N;i++){const x=st.intAt(i,0),y=st.intAt(i,1),bw=st.intAt(i,2),bh=st.intAt(i,3),ar=st.intAt(i,4);
+  if(ar<2500||ar>.2*w*h||x<=0||y<=0||x+bw>=w||y+bh>=h)continue;ac.set(i,{id:i,area:ar,x,y,w:bw,h:bh,cx:cen.doubleAt(i,0),cy:cen.doubleAt(i,1),u20:0,u02:0,u11:0})}
+ const d=lab.data32S;for(const[i,r]of ac){for(let yy=r.y;yy<r.y+r.h;yy++){const o=yy*w;for(let xx=r.x;xx<r.x+r.w;xx++)if(d[o+xx]===i){const dx=xx-r.cx,dy=yy-r.cy;r.u20+=dx*dx;r.u02+=dy*dy;r.u11+=dx*dy}}}
+ const out=[];for(const r of ac.values()){const a=r.u20/r.area,b=r.u02/r.area,c=r.u11/r.area,t=Math.sqrt(Math.max(0,((a-b)/2)**2+c*c)),l1=(a+b)/2+t,l2=Math.max(1e-9,(a+b)/2-t);
+  r.ecc=Math.sqrt(l1/l2);r.ang=.5*Math.atan2(2*c,a-b);r.fill=r.area/(r.w*r.h);out.push(r)}
+ return out}
+function mascaraRegion(L,r){const a=new Uint8Array(r.w*r.h),d=L._cc.lab.data32S;
+ for(let yy=0;yy<r.h;yy++)for(let xx=0;xx<r.w;xx++)if(d[(r.y+yy)*L.w+r.x+xx]===r.id)a[yy*r.w+xx]=255;
+ return{a,w:r.w,h:r.h,x0:r.x,y0:r.y,area:r.area,cx:r.cx,cy:r.cy}}
+/* ¿el texto alrededor de los dos centroides es el mismo? (las letras no cambian de tamaño aunque cambie el zoom) */
+function textoIgual(TA,pa,TB,pb){const W=150,H=84,P=14,ex=(T,p,ww,hh)=>{const x=Math.round(p[0]-ww/2),y=Math.round(p[1]-hh/2);if(x<0||y<0||x+ww>T.w||y+hh>T.h)return null;
+  const m=new cv.Mat(hh,ww,cv.CV_8UC1),o=m.data;for(let yy=0;yy<hh;yy++)o.set(T.a.subarray((y+yy)*T.w+x,(y+yy)*T.w+x+ww),yy*ww);return m};
+ const A=ex(TA,pa,W,H),B=ex(TB,pb,W+2*P,H+2*P);if(!A||!B){A&&A.delete();B&&B.delete();return 0}
+ let ink=0;for(let i=0;i<A.data.length;i++)if(A.data[i])ink++;if(ink<250){A.delete();B.delete();return 0}
+ const a2=new cv.Mat(),b2=new cv.Mat();cv.GaussianBlur(A,a2,new cv.Size(0,0),1.2);cv.GaussianBlur(B,b2,new cv.Size(0,0),1.2);
+ const r=new cv.Mat();cv.matchTemplate(b2,a2,r,cv.TM_CCOEFF_NORMED);const v=cv.minMaxLoc(r).maxVal;A.delete();B.delete();a2.delete();b2.delete();r.delete();return v===v?v:0}
+/* casas que aparecen en las dos piezas: misma silueta (a otra escala) y mismo texto. Devuelve la transformación A -> B y su fiabilidad */
+function casasComunes(LA,TA,LB,TB){const RA=regiones(LA),RB=regiones(LB),cand=[];
+ for(const a of RA)for(const b of RB){const s0=Math.sqrt(b.area/a.area);if(s0<.25||s0>4)continue;
+  if(Math.abs(a.fill-b.fill)>.07)continue;if(Math.abs(Math.log(a.ecc/b.ecc))>.14)continue;
+  if(a.ecc>1.25&&b.ecc>1.25){let da=Math.abs(a.ang-b.ang);da=Math.min(da,Math.PI-da);if(da>.1)continue}
+  cand.push([Math.abs(Math.log(a.ecc/b.ecc))+Math.abs(a.fill-b.fill),a,b])}
+ cand.sort((x,y)=>x[0]-y[0]);let best=null;
+ for(const[,a,b]of cand.slice(0,60)){const MA=mascaraRegion(LA,a),MB=mascaraRegion(LB,b),q=mismaCasa(MA,MB);if(!q||q.iou<.85)continue;
+  const tv=textoIgual(TA,[a.cx,a.cy],TB,[b.cx,b.cy]);if(tv<.5)continue;
+  const sc=q.iou*.6+tv*.4;if(!best||sc>best.v)best={v:sc,iou:q.iou,tv,s:q.s,x:q.x,y:q.y}}
+ return best}
+function liberaCC(L){if(L._cc){L._cc.lab.delete();L._cc.st.delete();L._cc.cen.delete();L._cc=null}}
+function lienzoL(L){const c=document.createElement('canvas');c.width=L.w;c.height=L.h;const g=c.getContext('2d',{willReadFrequently:true}),im=g.createImageData(L.w,L.h),D=im.data;
+ for(let i=0,p=0;i<L.a.length;i++,p+=4){const v=255-L.a[i];D[p]=D[p+1]=D[p+2]=v;D[p+3]=255}g.putImageData(im,0,0);return c}
+function matL(L,f,sig){const m=new cv.Mat(L.h,L.w,cv.CV_8UC1);m.data.set(L.a);const o=new cv.Mat();
+ cv.resize(m,o,new cv.Size(Math.max(8,Math.round(L.w*f)),Math.max(8,Math.round(L.h*f))),0,0,cv.INTER_AREA);m.delete();
+ const b=new cv.Mat();cv.GaussianBlur(o,b,new cv.Size(0,0),sig);o.delete();return b}
+/* coloca una pieza dentro de la vista general (que la contiene entera) por correlación de plantilla; escalas = posibles factores pieza->vista general */
+function plantilla(Lref,Lp,escalas){const fr=Math.min(.4,1200/Math.max(Lref.w,Lref.h)),R=matL(Lref,fr,1.5);let best=null;
+ const prueba=s=>{const f=fr*s;if(Lp.w*f<24||Lp.h*f<24||Lp.w*f>=R.cols||Lp.h*f>=R.rows)return;
+  const T=matL(Lp,f,1.5),res=new cv.Mat();cv.matchTemplate(R,T,res,cv.TM_CCOEFF_NORMED);const mm=cv.minMaxLoc(res);
+  if(mm.maxVal===mm.maxVal&&(!best||mm.maxVal>best.v))best={v:mm.maxVal,s,x:mm.maxLoc.x/fr,y:mm.maxLoc.y/fr};T.delete();res.delete()};
+ escalas.forEach(prueba);if(best){const b0=best.s;for(const m of [.96,.97,.98,.99,1.01,1.02,1.03,1.04])prueba(b0*m)}
+ R.delete();return best}
+/* igual, pero anclando la pieza a un marcador: cada marcador de la pieza se prueba sobre cada marcador del mismo color de la vista general */
+function plantillaMarc(Lref,Lp,escalas,pares){const fr=Math.min(.4,1200/Math.max(Lref.w,Lref.h)),R0=matL(Lref,fr,1.5),pad=Math.ceil(Math.max(Lp.w,Lp.h)*fr*Math.max(...escalas)),R=new cv.Mat();
+ cv.copyMakeBorder(R0,R,pad,pad,pad,pad,cv.BORDER_CONSTANT,new cv.Scalar(0,0,0,0));R0.delete();let best=null;
+ for(const s of escalas){const f=fr*s;if(Lp.w*f<24||Lp.h*f<24||Lp.w*f>=R.cols||Lp.h*f>=R.rows)continue;
+  const T=matL(Lp,f,1.5);
+  for(const[m,o]of pares){const x=o[0]-s*m[0],y=o[1]-s*m[1],X=Math.round(x*fr)+pad,Y=Math.round(y*fr)+pad;
+   if(X<0||Y<0||X+T.cols>R.cols||Y+T.rows>R.rows)continue;
+   const roi=R.roi(new cv.Rect(X,Y,T.cols,T.rows)),res=new cv.Mat();cv.matchTemplate(roi,T,res,cv.TM_CCOEFF_NORMED);const v=res.data32F[0];
+   if(v===v&&(!best||v>best.v))best={v,s,x,y};res.delete();roi.delete()}
+  T.delete()}
+ R.delete();return best}
+const grilla=(lo,hi,paso)=>{const o=[];for(let s=lo;s<=hi;s*=paso)o.push(s);return o};
 
 /* ---------- montaje de un PDF ---------- */
 async function montar(file,usarGeneral,log){
- let pgs=await paginas(file);if(pgs.length<2)throw new Error('El PDF necesita al menos 2 páginas.');
+ let pgs=await paginas(file);if(pgs.length<2)throw new Error('El PDF necesita al menos 2 páginas de plano (las hojas de registro de calles u otras tablas se ignoran).');
+ const omit=pgs.omitidas||0;if(omit)log(`(se ${omit===1?'ignora 1 página que no es plano':'ignoran '+omit+' páginas que no son plano'})`);
  let ref=pgs[0],piezas=pgs.slice(1),n=piezas.length;
  log('Detectando marcadores…');await sleep();
  const mo=marcadores(ref);let mps=piezas.map(marcadores);
  const areas=mo.map(m=>m[3]).sort((a,b)=>a-b),TOL=mo.length?Math.max(2.5,.8*Math.sqrt(areas[areas.length>>1])):4;
  let ab=piezas.map((p,k)=>regM(mps[k],mo,p.width,p.height,TOL));
- const sinG=!(ab.filter(a=>a&&a.s<.9).length>=Math.max(1,Math.ceil(n/2)));
+ const reg=ab.filter(a=>a&&a.s<.9&&a.n>=2).length,sinG=!(reg>=Math.max(1,Math.ceil(n/2))||(reg>=1&&mo.length>=4));
  if(sinG){piezas=pgs;n=pgs.length;ref=null;usarGeneral=false;mps=piezas.map(marcadores);ab=piezas.map(()=>null);log('(sin vista general: se montan todas las páginas como piezas)')}
- log('Buscando coincidencias entre casas, calles y detalles del plano…');await sleep();
+ log('Buscando coincidencias entre capturas…');await sleep();
  const ft=[];for(const p of piezas){ft.push(rasgos(p));await sleep()}
  const edges=[];
- for(let a=0;a<n;a++)for(let b=a+1;b<n;b++){const e=enlace(ft[a],ft[b],8);if(!e||corr(piezas[a],piezas[b],e)<.45)continue;
+ for(let a=0;a<n;a++)for(let b=a+1;b<n;b++){log(`Comparando capturas ${piezas[a].pn}.${piezas[a].sub} y ${piezas[b].pn}.${piezas[b].sub}…`);await sleep();
+  const e=enlace(ft[a],ft[b],8);if(!e||corr(piezas[a],piezas[b],e).c<.45)continue;
   if(ab[a]&&ab[b]&&Math.abs(e.s/(ab[a].s/ab[b].s)-1)>.06)continue;edges.push([a,b,e])}
  await sleep();
  if(sinG){const con=new Set(edges.map(e=>e[0]+','+e[1]));
@@ -166,8 +334,61 @@ async function montar(file,usarGeneral,log){
  edges.sort((p,q)=>q[2].n-p[2].n);
  const TR=ab.map(a=>a?{s:a.s,x:a.x,y:a.y}:null);
  if(sinG){const gr=[...Array(n).keys()].map(k=>edges.filter(e=>e[0]===k||e[1]===k).length);TR[gr.indexOf(Math.max(...gr))]={s:1,x:0,y:0}}
- for(let ch=true;ch;){ch=false;for(const[a,b,e]of edges){
-  if(TR[a]&&!TR[b]){TR[b]=comp(inv(e),TR[a]);ch=true}else if(TR[b]&&!TR[a]){TR[a]=comp(e,TR[b]);ch=true}}}
+ const prop=()=>{for(let ch=true;ch;){ch=false;for(const[a,b,e]of edges){
+  if(TR[a]&&!TR[b]){TR[b]=comp(inv(e),TR[a]);ch=true}else if(TR[b]&&!TR[a]){TR[a]=comp(e,TR[b]);ch=true}}}};
+ prop();
+ const como={};                                                      // cómo se colocó cada pieza que no tenía marcadores/enlace claros
+ let LS=null;const lineas=k=>(LS||(LS={}))[k]||(LS[k]=soloLineas(piezas[k]));
+ /* piezas aún sin colocar y con vista general: se buscan dentro de ella por correlación de plantilla.
+    Se puntúa con las líneas y con los colores de proyecto (magenta/azul), y se prefieren los marcadores de la vista general que aún no
+    tiene ocupados otra hoja (un mismo sitio puede venir dos veces: pequeño y ampliado, y el pequeño ya ocupa su marcador) */
+ if(!sinG&&ref){const reg2=ab.filter(a=>a&&a.s<.9&&a.n>=2).map(a=>a.s).sort((x,y)=>x-y),sm=reg2.length?reg2[reg2.length>>1]:null;let Lr=null,Cr=null;
+  const tolM=Math.max(5*TOL,.03*Math.max(ref.width,ref.height));
+  for(let k=0;k<n;k++){if(TR[k])continue;log(`Buscando la captura ${piezas[k].pn} dentro de la vista general…`);await sleep();
+   Lr=Lr||soloLineas(ref);Cr=Cr||soloColor(ref);const esc=sm?grilla(sm*.35,sm*1.3,1.04):grilla(.12,.9,1.06),pares=[];
+   for(const m of mps[k])for(const o of mo)if(o[2]===m[2])pares.push([m,o]);
+   /* marcadores de la vista general ocupados por piezas ya colocadas de otras hojas */
+   const ocup=o=>{for(let j=0;j<n;j++){if(!TR[j]||j===k||piezas[j].pn===piezas[k].pn)continue;for(const m of mps[j]){if(m[2]!==o[2])continue;const q=ap(TR[j],m);if(Math.hypot(q[0]-o[0],q[1]-o[1])<tolM)return true}}return false};
+   const libres=pares.filter(([m,o])=>!ocup(o));
+   const ejec=(P,L1,C1)=>{if(!P.length)return null;const r1=plantillaMarc(Lr,L1,esc,P),r2=C1?plantillaMarc(Cr,C1,esc,P):null;return r2&&(!r1||r2.v>r1.v)?r2:r1};
+   let C1=null;try{C1=soloColor(piezas[k])}catch(e){}
+   let r=null;
+   if(pares.length){
+    const rt=ejec(pares,lineas(k),C1);
+    if(rt&&rt.v>=.5)r=rt;
+    else{const rl=libres.length&&libres.length<pares.length?ejec(libres,lineas(k),C1):null;
+     if(rl&&rl.v>=.18)r=rl;else if(rt&&libres.length===pares.length&&rt.v>=.18)r=rt}
+   }else{const rp=plantilla(Lr,lineas(k),esc);if(rp&&rp.v>=.3)r=rp}
+   if(r){const T={s:r.s,x:r.x,y:r.y};
+    /* si la pieza trae marcadores, al colocarla alguno debe caer sobre un marcador de la vista general (y se ajusta con él) */
+    let ok2=true;if(mps[k].length&&mo.length){let bd=1e9,dx=0,dy=0;for(const m of mps[k]){const q=ap(T,m);for(const o of mo){if(o[2]!==m[2])continue;const dd=Math.hypot(q[0]-o[0],q[1]-o[1]);if(dd<bd){bd=dd;dx=o[0]-q[0];dy=o[1]-q[1]}}}
+     if(bd>tolM)ok2=false;else{T.x+=dx;T.y+=dy}}
+    if(ok2){TR[k]=T;como[k]='plantilla '+r.v.toFixed(2)}}await sleep()}
+  prop()}
+ /* enlace por etiquetas: una pieza suelta comparte con otra ya colocada alguna casa con su etiqueta (calle y número). La etiqueta fija el punto
+    y las líneas deciden la escala, que puede ser distinta entre capturas (las letras no cambian de tamaño aunque se amplíe el plano) */
+ {let TX=null,RL=null,RT=null;const texto=k=>(TX||(TX={}))[k]||(TX[k]=soloTexto(piezas[k]));
+  const prox=async()=>{let hecho=false;
+   for(let k=0;k<n;k++){if(TR[k])continue;let mejor=null;
+    const fuentes=[];for(let j=0;j<n;j++)if(j!==k&&TR[j])fuentes.push({j,L:()=>lineas(j),T:()=>texto(j),Tr:TR[j],nom:piezas[j].pn});
+    if(!sinG&&ref)fuentes.push({j:-1,L:()=>(RL||(RL=soloLineas(ref))),T:()=>(RT||(RT=soloTexto(ref))),Tr:{s:1,x:0,y:0},nom:'vista general'});
+    for(const f of fuentes){log(`Buscando casas comunes entre la captura ${piezas[k].pn} y ${f.nom==='vista general'?f.nom:'la '+f.nom}…`);await sleep();
+     let r=null;try{r=casasComunes(lineas(k),texto(k),f.L(),f.T())}catch(er){}
+     await sleep();
+     if(r&&(!mejor||r.v>mejor.v))mejor={v:r.v,T:comp({s:r.s,x:r.x,y:r.y},f.Tr),j:f.j,nom:f.nom}}
+    if(mejor){TR[k]=mejor.T;como[k]='casa común '+mejor.v.toFixed(2)+(mejor.j<0?' con la vista general':' con la '+mejor.nom);hecho=true}}
+   return hecho};
+  while(await prox());for(let k=0;k<n;k++)liberaCC(lineas(k));if(RL)liberaCC(RL);prop()}
+ /* rescate: piezas todavía sueltas se intentan enlazar con las ya colocadas usando solo las líneas (sin textos, que se repiten en todo el plano) a varias escalas */
+ const sueltas=()=>[...Array(n).keys()].filter(k=>!TR[k]);
+ if(sueltas().length&&sueltas().length<n){const SC=[.4,.5,.6,.7,.8,.9,1,1.15,1.3,1.5,1.75,2,2.4],fk={};
+  const orbL=(k,e)=>{const q=k+'_'+e;if(!fk[q]){const L=lineas(k),g=new Uint8Array(L.a.length);for(let i=0;i<g.length;i++)g[i]=255-L.a[i];fk[q]=orbGray(g,L.w,L.h,e,1.2)}return fk[q]};
+  const LC={};const lc=k=>LC[k]||(LC[k]=lienzoL(lineas(k)));
+  for(let ronda=0;ronda<n&&sueltas().length;ronda++){let mejor=null;
+   for(const u of sueltas())for(let v=0;v<n;v++){if(!TR[v])continue;log(`Probando a ubicar la captura ${piezas[u].pn} respecto a la ${piezas[v].pn}…`);await sleep();
+    for(const e of SC){const fa=orbL(u,e),r=enlace(fa,orbL(v,1),7);if(!r)continue;const tot={s:r.s*fa.k,x:r.x,y:r.y,n:r.n};if(tot.s<.2||tot.s>5)continue;
+     const q=corr(lc(u),lc(v),tot);if(r.n>=8&&q.c>=.35&&q.n>=2500&&(!mejor||q.c>mejor.c))mejor={u,v,e:tot,c:q.c}}}
+   if(!mejor)break;edges.push([mejor.u,mejor.v,mejor.e]);como[mejor.u]='solo líneas '+mejor.c.toFixed(2);prop()}}
  const par=[...Array(n).keys()],rt=x=>{while(par[x]!==x){par[x]=par[par[x]];x=par[x]}return x},ady=Array.from({length:n},()=>[]);
  for(const[a,b,e]of edges){if(!TR[a]||!TR[b])continue;if(rt(a)!==rt(b)){par[rt(a)]=rt(b);ady[a].push([b,e,false]);ady[b].push([a,e,true])}}
  const grupos={},vis=new Set();
@@ -187,30 +408,52 @@ async function montar(file,usarGeneral,log){
     if(Math.abs(dx)<2*TOL&&Math.abs(dy)<2*TOL)for(const k of grupos[r])TR[k]=comp(TR[k],{s:1,x:dx,y:dy})}
    rm=rm.concat(mg(r))}}
  const ok=[...Array(n).keys()].filter(k=>TR[k]),inf=[];
- for(let k=0;k<n;k++){const e=k+(sinG?1:2);
-  inf.push(!TR[k]?`pieza ${e}: NO localizada (sin coincidencias con las demás: ¿foto o escaneo?)`:ab[k]?`pieza ${e}: ${ab[k].n} marcadores coinciden`:`pieza ${e}: colocada por coincidencias visuales con otra pieza${sinG?'':' (conviene revisarla)'}`)}
- if(ok.length<Math.max(2,Math.floor((n+1)/2)+(n%2===0?1:0)))throw new Error(`No se pudo montar: solo se han podido ubicar ${ok.length} de ${n} páginas (¿son fotos, escaneos o formularios en vez de capturas?).`);
- /* lienzo */
- const Z=1/Math.min(...ok.map(k=>TR[k].s));let X0=1e9,Y0=1e9,X1=-1e9,Y1=-1e9;
- const capas=ok.map(k=>({c:piezas[k],T:TR[k],g:true}));if(usarGeneral&&ref)capas.push({c:ref,T:{s:1,x:0,y:0},g:false});
- for(const L of capas)for(const q of [[0,0],[L.c.width,0],[0,L.c.height],[L.c.width,L.c.height]]){const p=ap(L.T,q);X0=Math.min(X0,p[0]*Z);X1=Math.max(X1,p[0]*Z);Y0=Math.min(Y0,p[1]*Z);Y1=Math.max(Y1,p[1]*Z)}
- const red=Math.min(1,MAXPX/Math.max(X1-X0,Y1-Y0)),out=document.createElement('canvas');out.width=Math.round((X1-X0)*red);out.height=Math.round((Y1-Y0)*red);
- const g=out.getContext('2d');g.fillStyle='#fff';g.fillRect(0,0,out.width,out.height);g.imageSmoothingQuality='high';
- capas.sort((a,b)=>b.T.s-a.T.s);                       // primero las menos nítidas, encima las de más resolución
- for(const L of capas){const t=L.T,w=L.c.width,h=L.c.height,s=Z*red*t.s;
-  g.setTransform(s,0,0,s,Z*red*t.x-X0*red,Z*red*t.y-Y0*red);
-  const sx=L.g?w*TRIM.l:0,sy=L.g?h*TRIM.t:0,sw=w-sx-(L.g?w*TRIM.r:0),sh=h-sy-(L.g?h*TRIM.b:0);
-  g.drawImage(L.c,sx,sy,sw,sh,sx,sy,sw,sh)}
- g.setTransform(1,0,0,1,0,0);
- return{canvas:out,informe:inf,sin:inf.filter(l=>l.includes('NO localizada')).length}}
+ for(let k=0;k<n;k++){const e=piezas[k].pn+(piezas[k].nsub>1?` (parte ${piezas[k].sub})`:'');
+  inf.push(!TR[k]?`página ${e}: NO se ha podido ubicar; se añade al final como página aparte`:como[k]?`página ${e}: colocada por ${como[k]} (conviene revisarla)`:ab[k]?`página ${e}: ${ab[k].n} marcadores coinciden`:`página ${e}: colocada por enlace con otra pieza${sinG?'':' (conviene revisarla)'}`)}
+ if(ok.length<Math.min(n,Math.max(2,Math.ceil(n/3))))throw new Error(`No se pudo montar: solo se han podido ubicar ${ok.length} de ${n} páginas (¿son fotos, escaneos o formularios en vez de capturas?).`);
+ /* lienzo: se puede recomponer si el usuario coloca a mano alguna página suelta */
+ const manual={},bb=c=>c._bb||(c._bb=cajaTinta(c));let refHi=null;
+ const componer=()=>{
+  const TRx=TR.map((t,k)=>manual[k]||t),ok=[...Array(n).keys()].filter(k=>TRx[k]);
+  const Z=1/Math.min(...ok.map(k=>TRx[k].s));let X0=1e9,Y0=1e9,X1=-1e9,Y1=-1e9;
+  const capas=ok.map(k=>({c:piezas[k],T:TRx[k],g:true}));if(usarGeneral&&ref)capas.push(refHi?{c:refHi.c,T:{s:1/refHi.k,x:0,y:0},g:false}:{c:ref,T:{s:1,x:0,y:0},g:false});
+  for(const L of capas){const w=L.c.width,h=L.c.height,b=bb(L.c);let x0=b[0],y0=b[1],x1=b[2],y1=b[3];
+   if(L.g){x0=Math.max(x0,w*TRIM.l);y0=Math.max(y0,h*TRIM.t);x1=Math.min(x1,w*(1-TRIM.r));y1=Math.min(y1,h*(1-TRIM.b))}
+   L.r=[x0,y0,Math.max(1,x1-x0),Math.max(1,y1-y0)];
+   for(const q of [[x0,y0],[x1,y0],[x0,y1],[x1,y1]]){const p=ap(L.T,q);X0=Math.min(X0,p[0]*Z);X1=Math.max(X1,p[0]*Z);Y0=Math.min(Y0,p[1]*Z);Y1=Math.max(Y1,p[1]*Z)}}
+  const red=Math.min(1,MAXPX/Math.max(X1-X0,Y1-Y0)),out=document.createElement('canvas');out.width=Math.max(1,Math.round((X1-X0)*red));out.height=Math.max(1,Math.round((Y1-Y0)*red));
+  const g=out.getContext('2d');g.fillStyle='#fff';g.fillRect(0,0,out.width,out.height);g.imageSmoothingQuality='high';
+  capas.sort((a,b)=>b.T.s-a.T.s);                       // primero las menos nítidas, encima las de más resolución
+  for(const L of capas){const t=L.T,s=Z*red*t.s,r=L.r;
+   g.setTransform(s,0,0,s,Z*red*t.x-X0*red,Z*red*t.y-Y0*red);
+   g.drawImage(L.c,r[0],r[1],r[2],r[3],r[0],r[1],r[2],r[3])}
+  g.setTransform(1,0,0,1,0,0);
+  return{canvas:out,mapa:{Z,red,X0,Y0},TRx}};
+ const rec=c=>{const o=document.createElement('canvas'),sy=c.height*TRIM.t,sw=c.width*(1-TRIM.r),sh=c.height*(1-TRIM.t-TRIM.b);o.width=Math.round(sw);o.height=Math.round(sh);o.getContext('2d').drawImage(c,0,sy,sw,sh,0,0,o.width,o.height);return o};
+ let cur=componer();
+ /* la vista general se ve ampliada en el resultado: si es vectorial, se vuelve a dibujar a la resolución necesaria para que no salga borrosa */
+ if(usarGeneral&&ref&&ref.pdf){const sd=cur.mapa.Z*cur.mapa.red,k=Math.min(sd,Math.sqrt(2.6e7/(ref.width*ref.height)),8);
+  if(k>=1.4){log('Volviendo a dibujar la vista general con más resolución…');await sleep();try{refHi={c:await redibujar(ref,k),k};cur=componer()}catch(e){console.error(e);refHi=null}}}
+ const salida=()=>{const extras=[...Array(n).keys()].filter(k=>!cur.TRx[k]).map(k=>({c:rec(piezas[k]),pn:piezas[k].pn,sub:piezas[k].sub,nsub:piezas[k].nsub,k}));
+  return{canvas:cur.canvas,informe:inf,sin:extras.length,extras,piezas,colocar}};
+ /* colocar a mano: p1,p2 = dos puntos de la página suelta (px de la página); q1,q2 = los mismos puntos sobre el plano montado actual (px del lienzo) */
+ const colocar=(k,p1,p2,q1,q2)=>{const m=cur.mapa,P=q=>[(q[0]/m.red+m.X0)/m.Z,(q[1]/m.red+m.Y0)/m.Z],G1=P(q1),G2=P(q2),
+   s=Math.hypot(G2[0]-G1[0],G2[1]-G1[1])/Math.max(1e-6,Math.hypot(p2[0]-p1[0],p2[1]-p1[1]));
+  if(!(s>1e-4&&isFinite(s)))throw new Error('Los dos puntos elegidos están demasiado juntos.');
+  manual[k]={s,x:G1[0]-s*p1[0],y:G1[1]-s*p1[1]};
+  inf[k]=`página ${piezas[k].pn}${piezas[k].nsub>1?` (parte ${piezas[k].sub})`:''}: colocada a mano`;cur=componer();return salida()};
+ return salida()}
 
 /* ---------- A3 ---------- */
-function a3(canvas,titulo,nota){
- const vert=canvas.height>canvas.width,pdf=new jspdf.jsPDF({orientation:vert?'p':'l',unit:'mm',format:'a3'}),
-  PW=vert?297:420,PH=vert?420:297,mg=10,cab=14;
- pdf.setFontSize(16);pdf.text(titulo+(nota?'   '+nota:''),mg,mg+5);
- const aw=PW-2*mg,ah=PH-2*mg-cab,k=Math.min(aw/canvas.width,ah/canvas.height),w=canvas.width*k,h=canvas.height*k;
- pdf.addImage(canvas.toDataURL('image/jpeg',.93),'JPEG',mg+(aw-w)/2,mg+cab+(ah-h)/2,w,h);
+function a3(canvas,titulo,nota,extras){
+ const pdf=new jspdf.jsPDF({orientation:canvas.height>canvas.width?'p':'l',unit:'mm',format:'a3'});
+ const pagina=(cv2,txt,nueva)=>{const vert=cv2.height>cv2.width,PW=vert?297:420,PH=vert?420:297,mg=10,cab=14;
+  if(nueva)pdf.addPage('a3',vert?'p':'l');
+  pdf.setFontSize(16);pdf.text(txt,mg,mg+5);
+  const aw=PW-2*mg,ah=PH-2*mg-cab,k=Math.min(aw/cv2.width,ah/cv2.height),w=cv2.width*k,h=cv2.height*k;
+  pdf.addImage(cv2.toDataURL('image/jpeg',.93),'JPEG',mg+(aw-w)/2,mg+cab+(ah-h)/2,w,h)};
+ pagina(canvas,titulo+(nota?'   '+nota:''),false);
+ for(const x of (extras||[]))pagina(x.c,titulo+'   (página '+x.pn+' del original, sin ubicar en el plano)',true);
  return pdf.output('blob')}
 
 /* ---------- interfaz ---------- */
@@ -218,18 +461,41 @@ function add(txt,cls,sub){const d=document.createElement('div');d.className='it'
  d.firstChild.textContent=txt;d.lastChild.textContent=sub||'';$('#lg').appendChild(d);$('#lg').hidden=false;return d}
 function descarga(blob,nombre){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=nombre;a.click()}
 $('#fi').onchange=e=>{files=[...e.target.files];$('#nf').textContent=files.length+' PDF seleccionados';$('#go').disabled=!window.cv||!cv.Mat||!files.length};
+function muestra(it,nombre,r,ri){
+ const blob=a3(r.canvas,nombre,r.sin?`(${r.sin} página(s) sin ubicar: van al final)`:'',r.extras);results[ri]={n:nombre+'_A3.pdf',blob};
+ it.innerHTML='<span class="ok"></span> <a class="d" href="#"></a><small></small><div class="row bt"></div>';
+ it.children[0].textContent='✔ ';const a=it.querySelector('a');a.textContent=nombre+'_A3.pdf';a.onclick=ev=>{ev.preventDefault();descarga(blob,nombre+'_A3.pdf')};
+ it.querySelector('small').textContent=r.informe.join('\n');
+ const bt=it.querySelector('.bt');
+ for(const x of r.extras){const b=document.createElement('button');b.textContent='Colocar a mano la página '+x.pn+(x.nsub>1?' (parte '+x.sub+')':'');b.onclick=()=>abreMan(it,nombre,r,ri,x.k);bt.appendChild(b)}
+ $('#zip').disabled=!results.some(Boolean)}
+/* ---- colocar a mano una página suelta: dos puntos iguales en cada imagen ---- */
+let man=null;
+function pintaMan(){const m=man;
+ for(const[id,img,f,pts]of [['#c1',m.r.canvas,m.f1,m.p1],['#c2',m.r.piezas[m.k],m.f2,m.p2]]){const c=$(id),g=c.getContext('2d');c.width=Math.round(img.width*f);c.height=Math.round(img.height*f);
+  g.drawImage(img,0,0,c.width,c.height);g.lineWidth=2;g.font='bold 16px sans-serif';
+  pts.forEach((q,i)=>{g.strokeStyle='#e00';g.fillStyle='#e00';g.beginPath();g.arc(q[0],q[1],7,0,7);g.stroke();g.fillText(i+1,q[0]+10,q[1]-8)})}
+ $('#dlok').disabled=!(m.p1.length===2&&m.p2.length===2);
+ $('#dls').textContent=`puntos: plano ${m.p1.length}/2 · página ${m.p2.length}/2`}
+function abreMan(it,nombre,r,ri,k){const fit=img=>Math.min(1,900/Math.max(img.width,img.height));
+ man={it,nombre,r,ri,k,f1:fit(r.canvas),f2:fit(r.piezas[k]),p1:[],p2:[]};
+ $('#dlt').textContent='Colocar a mano la página '+r.piezas[k].pn+(r.piezas[k].nsub>1?' (parte '+r.piezas[k].sub+')':'')+' en '+nombre;pintaMan();$('#dl').showModal()}
+for(const[id,clave]of [['#c1','p1'],['#c2','p2']])$(id).onclick=ev=>{if(!man||man[clave].length>=2)return;const c=ev.target,b=c.getBoundingClientRect();
+ man[clave].push([(ev.clientX-b.left)*c.width/b.width,(ev.clientY-b.top)*c.height/b.height]);pintaMan()};
+$('#dlre').onclick=()=>{if(man){man.p1=[];man.p2=[];pintaMan()}};
+$('#dlno').onclick=()=>{man=null;$('#dl').close()};
+$('#dlok').onclick=()=>{const m=man;if(!m)return;
+ try{const q=m.p1.map(p=>[p[0]/m.f1,p[1]/m.f1]),p=m.p2.map(p=>[p[0]/m.f2,p[1]/m.f2]);
+  const r2=m.r.colocar(m.k,p[0],p[1],q[0],q[1]);man=null;$('#dl').close();muestra(m.it,m.nombre,r2,m.ri)}
+ catch(e){$('#dls').textContent=e.message}};
 $('#go').onclick=async()=>{
  $('#go').disabled=true;$('#zip').disabled=true;results=[];$('#lg').innerHTML='';$('#pg').hidden=false;$('#pg').max=files.length;$('#pg').value=0;
- for(let i=0;i<files.length;i++){const f=files[i],nombre=f.name.replace(/\.pdf$/i,''),it=add(f.name+' …','');let acc=[];
-  try{const r=await montar(f,$('#ug').checked,t=>{acc.push(t);$('#st').textContent=f.name+': '+t});
-   const blob=a3(r.canvas,nombre,r.sin?`(${r.sin} pieza(s) sin ubicar)`:'');results.push({n:nombre+'_A3.pdf',blob});
-   it.innerHTML='<span class="ok"></span> <a class="d" href="#"></a><small></small>';it.children[0].textContent='✔ ';
-   const a=it.querySelector('a');a.textContent=nombre+'_A3.pdf';a.onclick=ev=>{ev.preventDefault();descarga(blob,nombre+'_A3.pdf')};
-   it.querySelector('small').textContent=r.informe.join('\n')}
+ for(let i=0;i<files.length;i++){const f=files[i],nombre=f.name.replace(/\.pdf$/i,''),it=add(f.name+' …',''),ri=results.length;results.push(null);
+  try{const r=await montar(f,$('#ug').checked,t=>{$('#st').textContent=f.name+': '+t});muestra(it,nombre,r,ri)}
   catch(e){it.firstChild.className='er';it.firstChild.textContent='✘ '+f.name+': '+e.message;console.error(e)}
   $('#pg').value=i+1;await sleep()}
- $('#st').textContent='Terminado.';$('#go').disabled=false;$('#zip').disabled=!results.length};
-$('#zip').onclick=async()=>{const z=new JSZip();results.forEach(r=>z.file(r.n,r.blob));descarga(await z.generateAsync({type:'blob'}),'puzzles_A3.zip')};
+ $('#st').textContent='Terminado.';$('#go').disabled=false;$('#zip').disabled=!results.some(Boolean)};
+$('#zip').onclick=async()=>{const z=new JSZip();results.forEach(r=>{if(r)z.file(r.n,r.blob)});descarga(await z.generateAsync({type:'blob'}),'puzzles_A3.zip')};
 (function esperarCv(){if(window.cv&&cv.Mat){$('#st').textContent='Listo. Elige los PDFs.';$('#go').disabled=!files.length}else setTimeout(esperarCv,300)})();
 </script>
 </body>
