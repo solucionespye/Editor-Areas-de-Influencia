@@ -19,6 +19,7 @@ button,label.b{font:inherit;color:var(--fg);background:transparent;border:1px so
 button.p{background:var(--ac);color:var(--acf);border-color:var(--ac)}button:disabled{opacity:.45;cursor:default}
 .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 progress{width:100%;accent-color:var(--ac)}
+#cr{display:flex;flex-wrap:wrap;gap:4px 18px;font-size:13.5px;color:var(--mu);font-variant-numeric:tabular-nums}#cr b{color:var(--fg);font-weight:600}#cr .av{flex-basis:100%;color:var(--er)}
 #lg{max-height:340px;overflow:auto;font-size:13.5px;display:flex;flex-direction:column;gap:6px}
 .it{border-bottom:1px solid var(--bd);padding-bottom:6px}.ok{color:var(--ok)}.er{color:var(--er)}
 .it small{display:block;color:var(--mu);white-space:pre-wrap}
@@ -37,6 +38,7 @@ dialog canvas{width:46vw;max-width:46vw;height:auto;border:1px solid var(--bd);b
 <label class="row" style="gap:8px"><input id="ug" type="checkbox" checked> Usar la vista general (página 1) como fondo, si el PDF la tiene</label>
 <div class="row"><button id="go" class="p" disabled>Crear PDFs A3</button><button id="zip" disabled>Descargar todo (ZIP)</button></div>
 <progress id="pg" value="0" max="1" hidden></progress>
+<div id="cr" hidden></div>
 <p id="st">Cargando librerías (OpenCV.js pesa unos 10 MB, la primera vez tarda)…</p>
 </div>
 <div class="box" id="lg" hidden></div>
@@ -498,13 +500,27 @@ $('#dlok').onclick=()=>{const m=man;if(!m)return;
  try{const q=m.p1.map(p=>[p[0]/m.f1,p[1]/m.f1]),p=m.p2.map(p=>[p[0]/m.f2,p[1]/m.f2]);
   const r2=m.r.colocar(m.k,p[0],p[1],q[0],q[1]);man=null;$('#dl').close();muestra(m.it,m.nombre,r2,m.ri)}
  catch(e){$('#dls').textContent=e.message}};
+/* ---- contadores: procesados, tiempos y detección de tareas largas ---- */
+const CR={on:false,t0:0,tf:0,tarea:'',tt:0,ok:0,err:0,tot:0,nom:'',last:0,bloq:0,fin:0};
+const mmss=ms=>{const s=Math.max(0,Math.round(ms/1000));return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
+function pintaCR(){const e=$('#cr'),n=performance.now();e.hidden=false;const hechos=CR.ok+CR.err;
+ let h=`<span>Procesados: <b>${hechos} de ${CR.tot}</b>${CR.err?` (${CR.err} con error)`:''}</span><span>Tiempo total: <b>${mmss((CR.on?n:CR.fin)-CR.t0)}</b></span>`;
+ if(CR.on){h+=`<span>Este PDF: <b>${mmss(n-CR.tf)}</b></span><span>Tarea actual: <b>${mmss(n-CR.tt)}</b></span>`;
+  if(n-CR.tt>90000)h+=`<span class="av">⚠ Lleva ${mmss(n-CR.tt)} en la misma tarea («${CR.tarea.replace(/[<>&]/g,'')}»). Puede ser un paso lento o un bloqueo; si el reloj de arriba sigue avanzando la página no está colgada.</span>`}
+ if(CR.bloq>=3)h+=`<span>Mayor congelación de la pantalla: <b>${CR.bloq.toFixed(0)} s</b></span>`;
+ e.innerHTML=h}
+setInterval(()=>{if(!CR.on)return;const n=performance.now(),gap=n-CR.last;CR.last=n;if(gap>2500)CR.bloq=Math.max(CR.bloq,gap/1000);pintaCR()},1000);
 $('#go').onclick=async()=>{
  $('#go').disabled=true;$('#zip').disabled=true;results=[];$('#lg').innerHTML='';$('#pg').hidden=false;$('#pg').max=files.length;$('#pg').value=0;
+ Object.assign(CR,{on:true,t0:performance.now(),ok:0,err:0,tot:files.length,last:performance.now(),bloq:0,tarea:'',tt:performance.now()});pintaCR();
  for(let i=0;i<files.length;i++){const f=files[i],nombre=f.name.replace(/\.pdf$/i,''),it=add(f.name+' …',''),ri=results.length;results.push(null);
-  try{const r=await montar(f,$('#ug').checked,t=>{$('#st').textContent=f.name+': '+t});muestra(it,nombre,r,ri)}
-  catch(e){it.firstChild.className='er';it.firstChild.textContent='✘ '+f.name+': '+e.message;console.error(e)}
-  $('#pg').value=i+1;await sleep()}
- $('#st').textContent='Terminado.';$('#go').disabled=false;$('#zip').disabled=!results.some(Boolean)};
+  CR.tf=performance.now();CR.tt=CR.tf;CR.nom=f.name;CR.tarea='Empezando';pintaCR();
+  try{const r=await montar(f,$('#ug').checked,t=>{$('#st').textContent=f.name+': '+t;CR.tarea=t;CR.tt=performance.now();pintaCR()});muestra(it,nombre,r,ri);CR.ok++;
+   const sm=it.querySelector('small');if(sm)sm.textContent='Tiempo: '+mmss(performance.now()-CR.tf)+'\n'+sm.textContent}
+  catch(e){it.firstChild.className='er';it.firstChild.textContent='✘ '+f.name+': '+e.message+'  (tras '+mmss(performance.now()-CR.tf)+')';console.error(e);CR.err++}
+  $('#pg').value=i+1;pintaCR();await sleep()}
+ CR.on=false;CR.fin=performance.now();pintaCR();
+ $('#st').textContent='Terminado en '+mmss(CR.fin-CR.t0)+'.';$('#go').disabled=false;$('#zip').disabled=!results.some(Boolean)};
 $('#zip').onclick=async()=>{const z=new JSZip();results.forEach(r=>{if(r)z.file(r.n,r.blob)});descarga(await z.generateAsync({type:'blob'}),'Areas de INfluencia A3.zip')};
 (function esperarCv(){if(window.cv&&cv.Mat){$('#st').textContent='Listo. Elige los PDFs.';$('#go').disabled=!files.length}else setTimeout(esperarCv,300)})();
 </script>
