@@ -26,6 +26,7 @@ progress{width:100%;accent-color:var(--ac)}
 a.d{color:var(--ac);font-weight:600}
 .bt{margin-top:6px}
 dialog{max-width:96vw;background:var(--pn);color:var(--fg);border:1px solid var(--bd);border-radius:8px;padding:16px}
+#hst table{border-collapse:collapse;font-size:13px;width:100%}#hst th,#hst td{border-bottom:1px solid var(--bd);padding:4px 8px;text-align:left}
 dialog canvas{width:46vw;max-width:46vw;height:auto;border:1px solid var(--bd);background:#fff;cursor:crosshair}
 </style>
 </head>
@@ -36,18 +37,25 @@ dialog canvas{width:46vw;max-width:46vw;height:auto;border:1px solid var(--bd);b
 <div class="box">
 <div class="row"><label class="b">Elegir PDFs…<input id="fi" type="file" accept="application/pdf" multiple hidden></label><span id="nf" style="color:var(--mu)">Ningún PDF seleccionado</span></div>
 <label class="row" style="gap:8px"><input id="ug" type="checkbox" checked> Usar la vista general (página 1) como fondo, si el PDF la tiene</label>
-<div class="row"><button id="go" class="p" disabled>Crear PDFs A3</button><button id="zip" disabled>Descargar todo (ZIP)</button></div>
+<div class="row"><button id="go" class="p" disabled>Crear PDFs A3</button><button id="zip" disabled>Descargar todo (ZIP)</button><button id="hist">📊 Historial</button><button id="skip" hidden>⏭ Saltar este PDF</button><button id="stop" hidden>⏹ Parar todo</button></div>
 <progress id="pg" value="0" max="1" hidden></progress>
 <div id="cr" hidden></div>
 <p id="st">Cargando librerías (OpenCV.js pesa unos 10 MB, la primera vez tarda)…</p>
 </div>
 <div class="box" id="lg" hidden></div>
 </main>
+<dialog id="hs">
+<div class="row" style="flex-direction:column;align-items:flex-start;gap:8px"><b>Historial de este navegador</b>
+<p>Cada montaje guarda qué camino colocó cada página y tu valoración. Solo se guarda aquí (no se sube a ningún sitio). Con unas decenas de PDFs sirve para ajustar los umbrales con datos reales.</p>
+<div id="hst" style="max-height:55vh;overflow:auto;width:100%"></div></div>
+<div class="row" style="margin-top:10px"><button id="hcp">Copiar historial</button><button id="hdl">Descargar (.json)</button><button id="hbo">Borrar historial</button><button id="hcl" class="p">Cerrar</button></div>
+</dialog>
 <dialog id="dl">
 <div class="row" style="flex-direction:column;align-items:flex-start;gap:6px">
 <b id="dlt">Colocar a mano</b>
-<p>Pulsa <b>dos puntos que se vean iguales</b> en el plano montado (izquierda) y en la página suelta (derecha), en el mismo orden: por ejemplo dos esquinas de la misma parcela. Cuanto más separados estén, mejor encaja.</p>
+<p>Pulsa <b>dos puntos que se vean iguales</b> en la imagen de referencia (izquierda: el plano montado u otra página ya colocada) y en la página a colocar (derecha), en el mismo orden: por ejemplo dos esquinas de la misma parcela. Cuanto más separados estén, mejor encaja.</p>
 </div>
+<div class="row"><label>Página a colocar: <select id="dlpg"></select></label><label>Colocarla respecto a: <select id="dlref"></select></label></div>
 <div class="row" style="flex-wrap:nowrap;align-items:flex-start;margin:10px 0"><canvas id="c1"></canvas><canvas id="c2"></canvas></div>
 <div class="row"><button id="dlok" class="p" disabled>Colocar</button><button id="dlre">Borrar puntos</button><button id="dlno">Cancelar</button><span id="dls" style="color:var(--mu)"></span></div>
 </dialog>
@@ -58,10 +66,48 @@ dialog canvas{width:46vw;max-width:46vw;height:auto;border:1px solid var(--bd);b
 <script async src="https://docs.opencv.org/4.8.0/opencv.js"></script>
 <script>
 'use strict';
-const $=s=>document.querySelector(s), sleep=()=>new Promise(r=>setTimeout(r,0));
+let cancelar=false;   // lo pone el botón «Saltar este PDF»: el siguiente sleep() corta el proceso del archivo actual
+/* ---- SEGUNDO PLANO ----
+   Con la pestaña oculta, el navegador (a) frena setTimeout a 1 vez por segundo (y por minuto pasados 5 min) y
+   (b) NO ejecuta requestAnimationFrame, que pdf.js usa internamente para dibujar cada página.
+   Por eso antes el trabajo se arrastraba o se paraba al cambiar de pestaña/ventana. Aquí:
+   - ceder() cede el turno con MessageChannel, que no se frena en segundo plano.
+   - requestAnimationFrame se completa también por MessageChannel (lo que ocurra antes), para que pdf.js siga dibujando.
+   - mantener() pide un Web Lock (evita que el navegador congele la pestaña) y un Wake Lock (evita que se apague la pantalla). */
+const ceder=(()=>{const mc=new MessageChannel(),q=[];mc.port1.onmessage=()=>{const f=q.shift();if(f)f()};return()=>new Promise(r=>{q.push(r);mc.port2.postMessage(0)})})();
+(()=>{const raf=window.requestAnimationFrame.bind(window),mc=new MessageChannel(),q=[];let n=0;mc.port1.onmessage=()=>{const f=q.shift();if(f)f()};
+ window.requestAnimationFrame=cb=>{let hecho=false;const run=()=>{if(hecho)return;hecho=true;cb(performance.now())};raf(run);q.push(run);mc.port2.postMessage(0);return ++n}})();
+const KA={want:false,lock:null,wl:null};
+async function pideWake(){try{if(KA.want&&!KA.wl&&navigator.wakeLock&&!document.hidden){KA.wl=await navigator.wakeLock.request('screen');KA.wl.addEventListener('release',()=>{KA.wl=null})}}catch(e){KA.wl=null}}
+function mantener(on){KA.want=on;
+ if(on){try{if(!KA.lock&&navigator.locks)navigator.locks.request('montador-trabajando',()=>new Promise(r=>{if(!KA.want)return r();KA.lock=r})).catch(()=>{})}catch(e){}pideWake()}
+ else{if(KA.lock){KA.lock();KA.lock=null}if(KA.wl){try{KA.wl.release()}catch(e){}KA.wl=null}}}
+document.addEventListener('visibilitychange',()=>{if(typeof CR!=='undefined')CR.last=performance.now();if(!document.hidden)pideWake()});
+const $=s=>document.querySelector(s), sleep=()=>ceder().then(()=>{if(cancelar)throw new Error('Saltado por el usuario')});
 pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 const PX=300/72, TRIM={t:.035,b:.065,l:0,r:.015}, MAXPX=6000;
 let files=[], results=[];
+/* ---- historial local (solo en este navegador): qué camino colocó cada página y si el resultado era bueno, para ajustar el sistema con datos reales ---- */
+const VERSION='2026-10-15c',HK='montador_historial_v1';
+function histLoad(){try{return JSON.parse(localStorage.getItem(HK)||'[]')}catch(e){return []}}
+function histSave(h){try{localStorage.setItem(HK,JSON.stringify(h.slice(-300)))}catch(e){console.warn('No se pudo guardar el historial',e)}}
+const nuevoId=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+function histAdd(e){const h=histLoad();e.id=nuevoId();h.push(e);histSave(h);return e}
+function histUpd(id,f){const h=histLoad(),e=h.find(x=>x.id===id);if(e){f(e);histSave(h)}return e}
+function diagTexto(e){const L=[`Montador de puzzles ${e.ver||''} · ${e.nombre} · ${e.fecha?e.fecha.slice(0,16).replace('T',' '):''}`];
+ if(e.estado&&e.estado!=='ok')L.push(`Resultado: ${e.estado}${e.msg?' — '+e.msg:''}`);
+ else{L.push(`Páginas: ${e.n} · vista general: ${e.guia==='no'?'no':'sí (detectada por '+e.guia+')'} · tiempo: ${e.ms!=null?mmss(e.ms):'?'}`);
+  for(const p of e.piezas||[])L.push(`  página ${p.pn}${p.sub?' (parte '+p.sub+')':''}: ${p.camino}${p.antes?' (antes: '+p.antes+')':''}${p.punt!=null?' punt '+p.punt:''}${p.marc?' marc '+p.marc:''}${p.s!=null?' · escala '+p.s:''}${p.fallo?' · intentos: '+p.fallo:''}`)}
+ L.push('Valoración: '+(e.valoracion==='ok'?'bien':e.valoracion==='mal'?'MAL':'sin valorar')+(e.nota?' — '+e.nota:''));return L.join('\n')}
+async function copia(txt){try{await navigator.clipboard.writeText(txt)}catch(e){prompt('Copia este texto (Ctrl+C):',txt)}}
+function resumenHist(){const h=histLoad(),ok=h.filter(e=>!e.estado||e.estado==='ok'),bien=ok.filter(e=>e.valoracion==='ok').length,mal=ok.filter(e=>e.valoracion==='mal').length;
+ const C={};for(const e of ok)for(const p of e.piezas||[]){const c=C[p.camino]||(C[p.camino]={n:0,enBien:0,enMal:0,ps:[],corr:0});c.n++;if(e.valoracion==='ok')c.enBien++;if(e.valoracion==='mal')c.enMal++;if(p.punt!=null)c.ps.push(p.punt);
+  if(p.antes){const a=C[p.antes]||(C[p.antes]={n:0,enBien:0,enMal:0,ps:[],corr:0});a.corr++}}
+ const f=ps=>ps.length?(ps.reduce((a,b)=>a+b,0)/ps.length).toFixed(2):'–';
+ let t=`<p><b>${h.length}</b> entradas · <b>${ok.length}</b> montajes (<b>${bien}</b> bien, <b>${mal}</b> mal, ${ok.length-bien-mal} sin valorar) · ${h.filter(e=>e.estado==='error').length} con error · ${h.filter(e=>e.estado==='saltado').length} saltados</p>`;
+ t+='<table><tr><th>Camino</th><th>Páginas</th><th>En PDFs bien</th><th>En PDFs mal</th><th>Corregidas a mano</th><th>Punt. media</th></tr>';
+ for(const[k,c]of Object.entries(C).sort((a,b)=>b[1].enMal-a[1].enMal||b[1].n-a[1].n))t+=`<tr><td>${k}</td><td>${c.n}</td><td>${c.enBien}</td><td>${c.enMal}</td><td>${c.corr}</td><td>${f(c.ps)}</td></tr>`;
+ return t+'</table>'}
 let semilla=12345;const rnd=()=>{semilla=(semilla+0x6D2B79F5)|0;let t=Math.imul(semilla^semilla>>>15,1|semilla);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296};
 
 /* ---------- transformaciones p -> s*p + (x,y) ---------- */
@@ -180,7 +226,7 @@ function enlace(fa,fb,minimo){
  const bf=new cv.BFMatcher(cv.NORM_HAMMING,false),mv=new cv.DMatchVectorVector(),A=[],B=[];bf.knnMatch(fa.des,fb.des,mv,2);
  for(let i=0;i<mv.size();i++){const r=mv.get(i);if(r.size()<2)continue;const x=r.get(0),y=r.get(1);
   if(x.distance<.8*y.distance){A.push(fa.pts[x.queryIdx]);B.push(fb.pts[x.trainIdx])}}
- bf.delete();mv.delete();if(A.length<8)return null;
+ bf.delete();mv.delete();if(A.length<5)return null;
  const M=ransac(A,B);return(M&&M.n>=minimo&&M.s>.05&&M.s<20)?M:null}
 
 function boxblur(a,W,H,r){const t=new Float32Array(W*H),o=new Float32Array(W*H),k=2*r+1;
@@ -320,9 +366,28 @@ function plantillaMarc(Lref,Lp,escalas,pares){const fr=Math.min(.4,1200/Math.max
    if(v===v&&(!best||v>best.v))best={v,s,x,y};res.delete();roi.delete()}
   T.delete()}
  R.delete();return best}
+/* puntuación (0..1) de una colocación T de la pieza Lp sobre la vista general Lg: correlación de líneas solo en la zona que se solapa.
+   null si menos de la mitad de la pieza cae dentro de la vista general (no se puede juzgar) */
+function puntuaEnGuia(Lg,Lp,T){
+ const fr=Math.min(.4,1200/Math.max(Lg.w,Lg.h)),w=Lp.w*T.s,h=Lp.h*T.s,ix0=Math.max(0,T.x),iy0=Math.max(0,T.y),ix1=Math.min(Lg.w,T.x+w),iy1=Math.min(Lg.h,T.y+h);
+ if(ix1<=ix0||iy1<=iy0||(ix1-ix0)*(iy1-iy0)<.5*w*h)return null;
+ const sw=Math.round((ix1-ix0)*fr),sh=Math.round((iy1-iy0)*fr);if(sw<24||sh<24)return null;
+ const R=matL(Lg,fr,1.5),Tm=matL(Lp,fr*T.s,1.5);let v=null;
+ try{const gx=Math.round(ix0*fr),gy=Math.round(iy0*fr),tx=Math.round((ix0-T.x)*fr),ty=Math.round((iy0-T.y)*fr),
+  W=Math.min(sw,R.cols-gx,Tm.cols-tx),H=Math.min(sh,R.rows-gy,Tm.rows-ty);
+  if(W>=24&&H>=24){const a=R.roi(new cv.Rect(gx,gy,W,H)),b=Tm.roi(new cv.Rect(tx,ty,W,H)),res=new cv.Mat();cv.matchTemplate(a,b,res,cv.TM_CCOEFF_NORMED);v=res.data32F[0];res.delete();a.delete();b.delete()}}catch(e){}
+ R.delete();Tm.delete();return v===v?v:null}
 const grilla=(lo,hi,paso)=>{const o=[];for(let s=lo;s<=hi;s*=paso)o.push(s);return o};
 
 /* ---------- montaje de un PDF ---------- */
+/* ¿es la página 1 una vista general? Se busca cada captura dentro de ella por plantilla; vale si alguna encaja con puntuación alta
+   y con un tamaño notable (>=12 % de la página 1): una captura enterita dentro de la página 1 es lo que hace una vista general */
+async function pareceGuia(ref,piezas,log){
+ const Lr=soloLineas(ref),A=ref.width*ref.height,t0=performance.now();let ok=0;
+ for(const p of piezas){if(ok>=1||performance.now()-t0>90000)break;let r=null;const lo=Math.max(.12,Math.sqrt(.10*A/(p.width*p.height))),hi=Math.max(lo*1.3,Math.sqrt(1.1*A/(p.width*p.height)));try{r=plantilla(Lr,soloLineas(p),grilla(lo,hi,1.05))}catch(e){}
+  const fr=r?(p.width*r.s)*(p.height*r.s)/A:0;
+  if(r&&r.v>=.7&&fr>=.12&&fr<=1.1)ok++;await sleep()}
+ return ok>=1}
 async function montar(file,usarGeneral,log){
  let pgs=await paginas(file);if(pgs.length<2)throw new Error('El PDF necesita al menos 2 páginas de plano (las hojas de registro de calles u otras tablas se ignoran).');
  const omit=pgs.omitidas||0;if(omit)log(`(se ${omit===1?'ignora 1 página que no es plano':'ignoran '+omit+' páginas que no son plano'})`);
@@ -331,13 +396,15 @@ async function montar(file,usarGeneral,log){
  const mo=marcadores(ref);let mps=piezas.map(marcadores);
  const areas=mo.map(m=>m[3]).sort((a,b)=>a-b),TOL=mo.length?Math.max(2.5,.8*Math.sqrt(areas[areas.length>>1])):4;
  let ab=piezas.map((p,k)=>regM(mps[k],mo,p.width,p.height,TOL));
- const reg=ab.filter(a=>a&&a.s<.9&&a.n>=2).length,sinG=!(reg>=Math.max(1,Math.ceil(n/2))||(reg>=1&&mo.length>=4));
+ const reg=ab.filter(a=>a&&a.s<.9&&a.n>=2).length;let sinG=!(reg>=Math.max(1,Math.ceil(n/2))||(reg>=1&&mo.length>=4));let guiaPor=sinG?'no':'marcadores';
+ /* los marcadores no bastan (hay planos cuyas capturas casi no los traen): se mira si las demás páginas encajan DENTRO de la página 1 */
+ if(sinG&&n>=2){log('Comprobando si la página 1 es el plano guía…');await sleep();if(await pareceGuia(ref,piezas,log)){sinG=false;guiaPor='contenido';log('(la página 1 es la vista general: las demás capturas encajan dentro de ella)')}}
  if(sinG){piezas=pgs;n=pgs.length;ref=null;usarGeneral=false;mps=piezas.map(marcadores);ab=piezas.map(()=>null);log('(sin vista general: se montan todas las páginas como piezas)')}
  log('Buscando coincidencias entre capturas…');await sleep();
  const ft=[];for(const p of piezas){ft.push(rasgos(p));await sleep()}
  const edges=[];
  for(let a=0;a<n;a++)for(let b=a+1;b<n;b++){log(`Comparando capturas ${piezas[a].pn}.${piezas[a].sub} y ${piezas[b].pn}.${piezas[b].sub}…`);await sleep();
-  const e=enlace(ft[a],ft[b],8);if(!e||corr(piezas[a],piezas[b],e).c<.45)continue;
+  const e=enlace(ft[a],ft[b],5);if(!e)continue;const cc=corr(piezas[a],piezas[b],e).c;if(cc<(e.n<8?.5:.45))continue;   // con pocos puntos coincidentes (hojas que solo comparten un par de parcelas) se exige más correlación
   if(ab[a]&&ab[b]&&Math.abs(e.s/(ab[a].s/ab[b].s)-1)>.06)continue;edges.push([a,b,e])}
  await sleep();
  if(sinG){const con=new Set(edges.map(e=>e[0]+','+e[1]));
@@ -350,6 +417,8 @@ async function montar(file,usarGeneral,log){
   if(TR[a]&&!TR[b]){TR[b]=comp(inv(e),TR[a]);ch=true}else if(TR[b]&&!TR[a]){TR[a]=comp(e,TR[b]);ch=true}}}};
  prop();
  const como={};                                                      // cómo se colocó cada pieza que no tenía marcadores/enlace claros
+/* intentos: la mejor puntuación que alcanzó cada método con cada página (para el historial, si la página se queda sin ubicar) */
+ let rz={};const nota=(k,e,v)=>{if(v==null||!isFinite(v))return;const o=rz[k]||(rz[k]={});if(!(e in o)||v>o[e].v)o[e]={v:+v.toFixed(2)}};
  let LS=null;const lineas=k=>(LS||(LS={}))[k]||(LS[k]=soloLineas(piezas[k]));
  /* piezas aún sin colocar y con vista general: se buscan dentro de ella por correlación de plantilla.
     Se puntúa con las líneas y con los colores de proyecto (magenta/azul), y se prefieren los marcadores de la vista general que aún no
@@ -357,37 +426,53 @@ async function montar(file,usarGeneral,log){
  if(!sinG&&ref){const reg2=ab.filter(a=>a&&a.s<.9&&a.n>=2).map(a=>a.s).sort((x,y)=>x-y),sm=reg2.length?reg2[reg2.length>>1]:null;let Lr=null,Cr=null;
   const tolM=Math.max(5*TOL,.03*Math.max(ref.width,ref.height));
   for(let k=0;k<n;k++){if(TR[k])continue;log(`Buscando la captura ${piezas[k].pn} dentro de la vista general…`);await sleep();
-   Lr=Lr||soloLineas(ref);Cr=Cr||soloColor(ref);const esc=sm?grilla(sm*.35,sm*1.3,1.04):grilla(.12,.9,1.06),pares=[];
+   Lr=Lr||soloLineas(ref);Cr=Cr||soloColor(ref);const colS=[];for(let j=0;j<n;j++)if(TR[j])colS.push(TR[j].s);colS.sort((a,b)=>a-b);
+   const todasS=reg2.concat(colS),sm0=sm||(colS.length?colS[colS.length>>1]:null),AR=ref.width*ref.height,
+    lo0=todasS.length?Math.min(...todasS)*.5:null,hi0=todasS.length?Math.max(...todasS)*1.5:null,   // ventana entre las escalas ya vistas (las capturas pueden tener zooms distintos)
+    smin=Math.sqrt(.03*AR/(piezas[k].width*piezas[k].height)),esc=(lo0?grilla(Math.min(lo0,sm0?sm0*.4:lo0),Math.max(hi0,sm0?sm0*1.7:hi0),1.04):grilla(.12,.9,1.06)).filter(v=>mps[k].length||v>=smin),pares=[];
    for(const m of mps[k])for(const o of mo)if(o[2]===m[2])pares.push([m,o]);
    /* marcadores de la vista general ocupados por piezas ya colocadas de otras hojas */
    const ocup=o=>{for(let j=0;j<n;j++){if(!TR[j]||j===k||piezas[j].pn===piezas[k].pn)continue;for(const m of mps[j]){if(m[2]!==o[2])continue;const q=ap(TR[j],m);if(Math.hypot(q[0]-o[0],q[1]-o[1])<tolM)return true}}return false};
    const libres=pares.filter(([m,o])=>!ocup(o));
    const ejec=(P,L1,C1)=>{if(!P.length)return null;const r1=plantillaMarc(Lr,L1,esc,P),r2=C1?plantillaMarc(Cr,C1,esc,P):null;return r2&&(!r1||r2.v>r1.v)?r2:r1};
    let C1=null;try{C1=soloColor(piezas[k])}catch(e){}
-   let r=null;
+   let r=null,sinAncla=false;
    if(pares.length){
-    const rt=ejec(pares,lineas(k),C1);
+    const rt=ejec(pares,lineas(k),C1);if(rt)nota(k,'plantilla con marcadores',rt.v);
     if(rt&&rt.v>=.5)r=rt;
     else{const rl=libres.length&&libres.length<pares.length?ejec(libres,lineas(k),C1):null;
      if(rl&&rl.v>=.18)r=rl;else if(rt&&libres.length===pares.length&&rt.v>=.18)r=rt}
-   }else{const rp=plantilla(Lr,lineas(k),esc);if(rp&&rp.v>=.3)r=rp}
+    /* el resultado anclado a un marcador es flojo: se prueba también la búsqueda libre (los rombos de la vista general pueden estar desplazados respecto al dibujo).
+       Si sale un pico claramente mejor, manda la búsqueda libre y no se ajusta a ningún marcador */
+    if(!r||r.v<.5){let rp=null;try{rp=plantilla(Lr,lineas(k),esc)}catch(er){}if(rp)nota(k,'plantilla libre',rp.v);
+     if(rp&&rp.v>=.7&&(!r||rp.v>r.v+.2)){r=rp;sinAncla=true}}
+   }else{const rp=plantilla(Lr,lineas(k),esc);if(rp)nota(k,'plantilla libre',rp.v);if(rp&&rp.v>=.65)r=rp}   // sin marcadores la plantilla sola es poco fiable: si no puntúa alto, que decidan las etiquetas comunes y los enlaces
    if(r){const T={s:r.s,x:r.x,y:r.y};
     /* si la pieza trae marcadores, al colocarla alguno debe caer sobre un marcador de la vista general (y se ajusta con él) */
-    let ok2=true;if(mps[k].length&&mo.length){let bd=1e9,dx=0,dy=0;for(const m of mps[k]){const q=ap(T,m);for(const o of mo){if(o[2]!==m[2])continue;const dd=Math.hypot(q[0]-o[0],q[1]-o[1]);if(dd<bd){bd=dd;dx=o[0]-q[0];dy=o[1]-q[1]}}}
+    let ok2=true;if(mps[k].length&&mo.length&&!sinAncla){let bd=1e9,dx=0,dy=0;for(const m of mps[k]){const q=ap(T,m);for(const o of mo){if(o[2]!==m[2])continue;const dd=Math.hypot(q[0]-o[0],q[1]-o[1]);if(dd<bd){bd=dd;dx=o[0]-q[0];dy=o[1]-q[1]}}}
      if(bd>tolM)ok2=false;else{T.x+=dx;T.y+=dy}}
-    if(ok2){TR[k]=T;como[k]='plantilla '+r.v.toFixed(2)}}await sleep()}
+    if(ok2&&!pares.length&&(piezas[k].width*T.s)*(piezas[k].height*T.s)/AR<.03)ok2=false;   // sin marcadores que la anclen, no puede ser una miniatura
+    if(ok2){TR[k]=T;como[k]='plantilla '+r.v.toFixed(2);prop()}else nota(k,'plantilla descartada (marcadores/tamaño)',r.v)}await sleep()}
   prop()}
  /* enlace por etiquetas: una pieza suelta comparte con otra ya colocada alguna casa con su etiqueta (calle y número). La etiqueta fija el punto
     y las líneas deciden la escala, que puede ser distinta entre capturas (las letras no cambian de tamaño aunque se amplíe el plano) */
- {let TX=null,RL=null,RT=null;const texto=k=>(TX||(TX={}))[k]||(TX[k]=soloTexto(piezas[k]));
+ {let TX=null,RL=null,RT=null,Lg=null;const texto=k=>(TX||(TX={}))[k]||(TX[k]=soloTexto(piezas[k]));
   const prox=async()=>{let hecho=false;
    for(let k=0;k<n;k++){if(TR[k])continue;let mejor=null;
     const fuentes=[];for(let j=0;j<n;j++)if(j!==k&&TR[j])fuentes.push({j,L:()=>lineas(j),T:()=>texto(j),Tr:TR[j],nom:piezas[j].pn});
     if(!sinG&&ref)fuentes.push({j:-1,L:()=>(RL||(RL=soloLineas(ref))),T:()=>(RT||(RT=soloTexto(ref))),Tr:{s:1,x:0,y:0},nom:'vista general'});
+    const cands=[];
     for(const f of fuentes){log(`Buscando casas comunes entre la captura ${piezas[k].pn} y ${f.nom==='vista general'?f.nom:'la '+f.nom}…`);await sleep();
      let r=null;try{r=casasComunes(lineas(k),texto(k),f.L(),f.T())}catch(er){}
      await sleep();
-     if(r&&(!mejor||r.v>mejor.v))mejor={v:r.v,T:comp({s:r.s,x:r.x,y:r.y},f.Tr),j:f.j,nom:f.nom}}
+     if(r)cands.push({v:r.v,T:comp({s:r.s,x:r.x,y:r.y},f.Tr),j:f.j,nom:f.nom})}
+    /* con vista general, esta es la que decide: gana el candidato cuya colocación coincide mejor con ella (un parecido de casas puede salir en un sitio equivocado) */
+    if(cands.length)nota(k,'casas comunes',Math.max(...cands.map(c=>c.v)));if(cands.length&&!sinG&&ref){Lg=Lg||soloLineas(ref);
+     for(const c of cands){let g=null;try{g=puntuaEnGuia(Lg,lineas(k),c.T)}catch(er){}c.g=g}
+     const con=cands.filter(c=>c.g!==null);if(con.length)nota(k,'casas comunes en la guía',Math.max(...con.map(c=>c.g)));
+     if(con.length){con.sort((a,b)=>b.g-a.g||b.v-a.v);if(con[0].g>=.15||cands.length===1)mejor=con[0];else mejor=null}
+     else mejor=cands.sort((a,b)=>b.v-a.v)[0]}
+    else mejor=cands.sort((a,b)=>b.v-a.v)[0]||null;
     if(mejor){TR[k]=mejor.T;como[k]='casa común '+mejor.v.toFixed(2)+(mejor.j<0?' con la vista general':' con la '+mejor.nom);hecho=true}}
    return hecho};
   while(await prox());for(let k=0;k<n;k++)liberaCC(lineas(k));if(RL)liberaCC(RL);prop()}
@@ -399,8 +484,21 @@ async function montar(file,usarGeneral,log){
   for(let ronda=0;ronda<n&&sueltas().length;ronda++){let mejor=null;
    for(const u of sueltas())for(let v=0;v<n;v++){if(!TR[v])continue;log(`Probando a ubicar la captura ${piezas[u].pn} respecto a la ${piezas[v].pn}…`);await sleep();
     for(const e of SC){const fa=orbL(u,e),r=enlace(fa,orbL(v,1),7);if(!r)continue;const tot={s:r.s*fa.k,x:r.x,y:r.y,n:r.n};if(tot.s<.2||tot.s>5)continue;
-     const q=corr(lc(u),lc(v),tot);if(r.n>=8&&q.c>=.35&&q.n>=2500&&(!mejor||q.c>mejor.c))mejor={u,v,e:tot,c:q.c}}}
+     const q=corr(lc(u),lc(v),tot);if(r.n>=8)nota(u,'solo líneas',q.c);if(r.n>=8&&q.c>=.35&&q.n>=2500&&(!mejor||q.c>mejor.c))mejor={u,v,e:tot,c:q.c}}}
    if(!mejor)break;edges.push([mejor.u,mejor.v,mejor.e]);como[mejor.u]='solo líneas '+mejor.c.toFixed(2);prop()}}
+ /* rescate 2: una captura es la ampliación (o la vista más amplia) de otra ya colocada, a distinto zoom. Se busca una dentro de la otra por plantilla de líneas,
+    en los dos sentidos: la suelta dentro de la colocada, o la colocada dentro de la suelta */
+ if(sueltas().length&&sueltas().length<n){
+  const tR=performance.now();   // tope de tiempo: con muchas capturas sueltas este rescate (todas contra todas) podría tardar muchísimo
+  for(let ronda=0;ronda<n&&sueltas().length&&performance.now()-tR<120000;ronda++){let mj=null;
+   for(const u of sueltas())for(let w=0;w<n;w++){if(!TR[w]||performance.now()-tR>120000)continue;log(`Buscando la captura ${piezas[u].pn} dentro de la ${piezas[w].pn} (y al revés)…`);await sleep();
+    let rA=null,rB=null;
+    try{rA=plantilla(lineas(w),lineas(u),grilla(.15,1.0,1.06))}catch(er){}if(rA)nota(u,'plantilla entre piezas',rA.v);
+    await sleep();
+    try{rB=plantilla(lineas(u),lineas(w),grilla(.15,1.0,1.06))}catch(er){}if(rB)nota(u,'plantilla entre piezas',rB.v);
+    if(rA&&rA.v>=.75&&rA.s>=.2&&rA.s<=5&&(!mj||rA.v>mj.v))mj={u,w,v:rA.v,T:comp({s:rA.s,x:rA.x,y:rA.y},TR[w])};
+    if(rB&&rB.v>=.75&&1/rB.s>=.2&&1/rB.s<=5&&(!mj||rB.v>mj.v))mj={u,w,v:rB.v,T:comp(inv({s:rB.s,x:rB.x,y:rB.y}),TR[w])}}
+   if(!mj)break;TR[mj.u]=mj.T;como[mj.u]='plantilla con la '+piezas[mj.w].pn+' '+mj.v.toFixed(2);prop()}}
  const par=[...Array(n).keys()],rt=x=>{while(par[x]!==x){par[x]=par[par[x]];x=par[x]}return x},ady=Array.from({length:n},()=>[]);
  for(const[a,b,e]of edges){if(!TR[a]||!TR[b])continue;if(rt(a)!==rt(b)){par[rt(a)]=rt(b);ady[a].push([b,e,false]);ady[b].push([a,e,true])}}
  const grupos={},vis=new Set();
@@ -446,10 +544,15 @@ async function montar(file,usarGeneral,log){
  /* la vista general se ve ampliada en el resultado: si es vectorial, se vuelve a dibujar a la resolución necesaria para que no salga borrosa */
  if(usarGeneral&&ref&&ref.pdf){const sd=cur.mapa.Z*cur.mapa.red,k=Math.min(sd,Math.sqrt(2.6e7/(ref.width*ref.height)),8);
   if(k>=1.4){log('Volviendo a dibujar la vista general con más resolución…');await sleep();try{refHi={c:await redibujar(ref,k),k};cur=componer()}catch(e){console.error(e);refHi=null}}}
+/* diagnóstico estructurado de este montaje (para el historial): qué camino colocó cada página, con qué puntuación y escala */
+ const catCamino=c=>/^plantilla con la/.test(c)?'plantilla entre piezas':/^plantilla/.test(c)?'plantilla':/^casa común/.test(c)?(/vista general/.test(c)?'casa común con guía':'casa común con pieza'):/^solo líneas/.test(c)?'solo líneas':c;
+ const camino0=k=>!TR[k]?'sin ubicar':como[k]?catCamino(como[k]):ab[k]?'marcadores':'enlace';
+ const diagnostico=()=>({guia:guiaPor,n,piezas:piezas.map((p,k)=>{const T=manual[k]||TR[k],m=como[k]&&como[k].match(/\d\.\d\d/);
+   return{pn:p.pn,sub:p.nsub>1?p.sub:0,camino:manual[k]?'manual':camino0(k),antes:manual[k]?camino0(k):undefined,fallo:!TR[k]?(rz[k]?Object.entries(rz[k]).map(([e,o])=>e+' '+o.v).join(', '):'ningún método llegó a puntuar'):undefined,punt:m?+m[0]:undefined,marc:ab[k]?ab[k].n:undefined,s:T?+T.s.toFixed(3):undefined,w:p.width,h:p.height}})});
  const salida=()=>{const extras=[...Array(n).keys()].filter(k=>!cur.TRx[k]).map(k=>({c:rec(piezas[k]),pn:piezas[k].pn,sub:piezas[k].sub,nsub:piezas[k].nsub,k}));
-  return{canvas:cur.canvas,informe:inf,sin:extras.length,extras,piezas,colocar}};
+  return{canvas:cur.canvas,informe:inf,sin:extras.length,extras,piezas,colocar,colocadas:cur.TRx.map(t=>!!t),diag:diagnostico()}};
  /* colocar a mano: p1,p2 = dos puntos de la página suelta (px de la página); q1,q2 = los mismos puntos sobre el plano montado actual (px del lienzo) */
- const colocar=(k,p1,p2,q1,q2)=>{const m=cur.mapa,P=q=>[(q[0]/m.red+m.X0)/m.Z,(q[1]/m.red+m.Y0)/m.Z],G1=P(q1),G2=P(q2),
+ const colocar=(k,p1,p2,q1,q2,j)=>{const m=cur.mapa,Tj=(j!=null&&j>=0)?cur.TRx[j]:null;if(j!=null&&j>=0&&!Tj)throw new Error('La página de referencia no está colocada.');const P=Tj?(q=>ap(Tj,q)):(q=>[(q[0]/m.red+m.X0)/m.Z,(q[1]/m.red+m.Y0)/m.Z]),G1=P(q1),G2=P(q2),
    s=Math.hypot(G2[0]-G1[0],G2[1]-G1[1])/Math.max(1e-6,Math.hypot(p2[0]-p1[0],p2[1]-p1[1]));
   if(!(s>1e-4&&isFinite(s)))throw new Error('Los dos puntos elegidos están demasiado juntos.');
   manual[k]={s,x:G1[0]-s*p1[0],y:G1[1]-s*p1[1]};
@@ -474,54 +577,85 @@ function add(txt,cls,sub){const d=document.createElement('div');d.className='it'
 function descarga(blob,nombre){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=nombre;a.click()}
 $('#fi').onchange=e=>{files=[...e.target.files];$('#nf').textContent=files.length+' PDF seleccionados';$('#go').disabled=!window.cv||!cv.Mat||!files.length};
 function muestra(it,nombre,r,ri){
- const blob=a3(r.canvas,nombre,r.sin?`(${r.sin} página(s) sin ubicar: van al final)`:'',r.extras);results[ri]={n:nombre+'_A3.pdf',blob};
+ const blob=a3(r.canvas,nombre,r.sin?`(${r.sin} página(s) sin ubicar: van al final)`:'',r.extras);const idPrev=results[ri]&&results[ri].id;results[ri]={n:nombre+'_A3.pdf',blob,id:idPrev};
+ let ent=idPrev?histUpd(idPrev,e=>Object.assign(e,{n:r.diag.n,guia:r.diag.guia,piezas:r.diag.piezas,corregido:true})):null;
+ if(!ent)ent=histAdd({nombre,ver:VERSION,fecha:new Date().toISOString(),ms:CR.on?Math.round(performance.now()-CR.tf):null,estado:'ok',valoracion:null,nota:'',n:r.diag.n,guia:r.diag.guia,piezas:r.diag.piezas});
+ results[ri].id=ent.id;
  it.innerHTML='<span class="ok"></span> <a class="d" href="#"></a><small></small><div class="row bt"></div>';
  it.children[0].textContent='✔ ';const a=it.querySelector('a');a.textContent=nombre+'_A3.pdf';a.onclick=ev=>{ev.preventDefault();descarga(blob,nombre+'_A3.pdf')};
  it.querySelector('small').textContent=r.informe.join('\n');
  const bt=it.querySelector('.bt');
  for(const x of r.extras){const b=document.createElement('button');b.textContent='Colocar a mano la página '+x.pn+(x.nsub>1?' (parte '+x.sub+')':'');b.onclick=()=>abreMan(it,nombre,r,ri,x.k);bt.appendChild(b)}
+ {const b=document.createElement('button');b.textContent='Colocar a mano otra página…';b.onclick=()=>abreMan(it,nombre,r,ri,r.extras.length?r.extras[0].k:0);bt.appendChild(b)}
+ /* valoración y diagnóstico: alimentan el historial */
+ const mk=(t,f)=>{const b=document.createElement('button');b.textContent=t;b.onclick=f;bt.appendChild(b);return b};
+ const pinta=()=>{const e=histLoad().find(x=>x.id===ent.id)||{};bOk.style.fontWeight=e.valoracion==='ok'?'700':'';bOk.textContent=(e.valoracion==='ok'?'✓ ':'')+'👍 Está bien';bMal.style.fontWeight=e.valoracion==='mal'?'700':'';bMal.textContent=(e.valoracion==='mal'?'✓ ':'')+'👎 Está mal'};
+ const bOk=mk('👍 Está bien',()=>{histUpd(ent.id,e=>{e.valoracion='ok'});pinta()});
+ const bMal=mk('👎 Está mal',()=>{const nota=prompt('¿Qué ha salido mal? (opcional, p. ej. "miniatura abajo", "falta la página 5")','');if(nota===null)return;histUpd(ent.id,e=>{e.valoracion='mal';e.nota=nota});pinta()});
+ mk('📋 Copiar diagnóstico',()=>copia(diagTexto(histLoad().find(x=>x.id===ent.id)||ent)));pinta();
  $('#zip').disabled=!results.some(Boolean)}
 /* ---- colocar a mano una página suelta: dos puntos iguales en cada imagen ---- */
 let man=null;
 function pintaMan(){const m=man;
- for(const[id,img,f,pts]of [['#c1',m.r.canvas,m.f1,m.p1],['#c2',m.r.piezas[m.k],m.f2,m.p2]]){const c=$(id),g=c.getContext('2d');c.width=Math.round(img.width*f);c.height=Math.round(img.height*f);
+ for(const[id,img,f,pts]of [['#c1',m.ref<0?m.r.canvas:m.r.piezas[m.ref],m.f1,m.p1],['#c2',m.r.piezas[m.k],m.f2,m.p2]]){const c=$(id),g=c.getContext('2d');c.width=Math.round(img.width*f);c.height=Math.round(img.height*f);
   g.drawImage(img,0,0,c.width,c.height);g.lineWidth=2;g.font='bold 16px sans-serif';
   pts.forEach((q,i)=>{g.strokeStyle='#e00';g.fillStyle='#e00';g.beginPath();g.arc(q[0],q[1],7,0,7);g.stroke();g.fillText(i+1,q[0]+10,q[1]-8)})}
  $('#dlok').disabled=!(m.p1.length===2&&m.p2.length===2);
  $('#dls').textContent=`puntos: plano ${m.p1.length}/2 · página ${m.p2.length}/2`}
-function abreMan(it,nombre,r,ri,k){const fit=img=>Math.min(1,900/Math.max(img.width,img.height));
- man={it,nombre,r,ri,k,f1:fit(r.canvas),f2:fit(r.piezas[k]),p1:[],p2:[]};
- $('#dlt').textContent='Colocar a mano la página '+r.piezas[k].pn+(r.piezas[k].nsub>1?' (parte '+r.piezas[k].sub+')':'')+' en '+nombre;pintaMan();$('#dl').showModal()}
+const etqP=p=>'Página '+p.pn+(p.nsub>1?' (parte '+p.sub+')':'');
+function refrescaMan(){const m=man,fit=img=>Math.min(1,900/Math.max(img.width,img.height));
+ m.f1=fit(m.ref<0?m.r.canvas:m.r.piezas[m.ref]);m.f2=fit(m.r.piezas[m.k]);m.p1=[];m.p2=[];
+ $('#dlt').textContent='Colocar a mano la '+etqP(m.r.piezas[m.k]).toLowerCase()+' en '+m.nombre;pintaMan()}
+function llenaRef(){const m=man,s=$('#dlref');s.innerHTML='';const o0=document.createElement('option');o0.value=-1;o0.textContent='El plano montado';s.appendChild(o0);
+ m.r.piezas.forEach((p,i)=>{if(i===m.k||!m.r.colocadas[i])return;const o=document.createElement('option');o.value=i;o.textContent=etqP(p);s.appendChild(o)});s.value=m.ref}
+function abreMan(it,nombre,r,ri,k){man={it,nombre,r,ri,k,ref:-1,p1:[],p2:[]};
+ const pg=$('#dlpg');pg.innerHTML='';r.piezas.forEach((p,i)=>{const o=document.createElement('option');o.value=i;o.textContent=etqP(p)+(r.colocadas[i]?'':' (sin ubicar)');pg.appendChild(o)});pg.value=k;
+ llenaRef();refrescaMan();$('#dl').showModal()}
+$('#dlpg').onchange=()=>{if(!man)return;man.k=+$('#dlpg').value;if(man.ref===man.k)man.ref=-1;llenaRef();refrescaMan()};
+$('#dlref').onchange=()=>{if(!man)return;man.ref=+$('#dlref').value;refrescaMan()};
 for(const[id,clave]of [['#c1','p1'],['#c2','p2']])$(id).onclick=ev=>{if(!man||man[clave].length>=2)return;const c=ev.target,b=c.getBoundingClientRect();
  man[clave].push([(ev.clientX-b.left)*c.width/b.width,(ev.clientY-b.top)*c.height/b.height]);pintaMan()};
 $('#dlre').onclick=()=>{if(man){man.p1=[];man.p2=[];pintaMan()}};
 $('#dlno').onclick=()=>{man=null;$('#dl').close()};
 $('#dlok').onclick=()=>{const m=man;if(!m)return;
  try{const q=m.p1.map(p=>[p[0]/m.f1,p[1]/m.f1]),p=m.p2.map(p=>[p[0]/m.f2,p[1]/m.f2]);
-  const r2=m.r.colocar(m.k,p[0],p[1],q[0],q[1]);man=null;$('#dl').close();muestra(m.it,m.nombre,r2,m.ri)}
+  const r2=m.r.colocar(m.k,p[0],p[1],q[0],q[1],m.ref);man=null;$('#dl').close();muestra(m.it,m.nombre,r2,m.ri)}
  catch(e){$('#dls').textContent=e.message}};
 /* ---- contadores: procesados, tiempos y detección de tareas largas ---- */
-const CR={on:false,t0:0,tf:0,tarea:'',tt:0,ok:0,err:0,tot:0,nom:'',last:0,bloq:0,fin:0};
+const CR={on:false,t0:0,tf:0,tarea:'',tt:0,ok:0,err:0,salt:0,tot:0,nom:'',last:0,bloq:0,fin:0};
 const mmss=ms=>{const s=Math.max(0,Math.round(ms/1000));return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
-function pintaCR(){const e=$('#cr'),n=performance.now();e.hidden=false;const hechos=CR.ok+CR.err;
- let h=`<span>Procesados: <b>${hechos} de ${CR.tot}</b>${CR.err?` (${CR.err} con error)`:''}</span><span>Tiempo total: <b>${mmss((CR.on?n:CR.fin)-CR.t0)}</b></span>`;
+function pintaCR(){const e=$('#cr'),n=performance.now();e.hidden=false;const hechos=CR.ok+CR.err+CR.salt;
+ document.title=CR.on?`(${hechos}/${CR.tot}) Editor Areas de Influencia`:(CR.tot&&hechos>=CR.tot?'✔ Terminado · Editor Areas de Influencia':'Editor Areas de Influencia');
+ let h=`<span>Procesados: <b>${hechos} de ${CR.tot}</b>${CR.err?` (${CR.err} con error)`:''}${CR.salt?` (${CR.salt} saltados)`:''}</span><span>Tiempo total: <b>${mmss((CR.on?n:CR.fin)-CR.t0)}</b></span>`;
  if(CR.on){h+=`<span>Este PDF: <b>${mmss(n-CR.tf)}</b></span><span>Tarea actual: <b>${mmss(n-CR.tt)}</b></span>`;
   if(n-CR.tt>90000)h+=`<span class="av">⚠ Lleva ${mmss(n-CR.tt)} en la misma tarea («${CR.tarea.replace(/[<>&]/g,'')}»). Puede ser un paso lento o un bloqueo; si el reloj de arriba sigue avanzando la página no está colgada.</span>`}
  if(CR.bloq>=3)h+=`<span>Mayor congelación de la pantalla: <b>${CR.bloq.toFixed(0)} s</b></span>`;
  e.innerHTML=h}
-setInterval(()=>{if(!CR.on)return;const n=performance.now(),gap=n-CR.last;CR.last=n;if(gap>2500)CR.bloq=Math.max(CR.bloq,gap/1000);pintaCR()},1000);
+setInterval(()=>{if(!CR.on)return;const n=performance.now(),gap=n-CR.last;CR.last=n;if(gap>2500&&!document.hidden)CR.bloq=Math.max(CR.bloq,gap/1000);pintaCR()},1000);
+let parar=false;
+$('#hist').onclick=()=>{$('#hst').innerHTML=resumenHist();$('#hs').showModal()};
+$('#hcl').onclick=()=>$('#hs').close();
+$('#hcp').onclick=()=>copia(JSON.stringify(histLoad()));
+$('#hdl').onclick=()=>descarga(new Blob([JSON.stringify(histLoad(),null,1)],{type:'application/json'}),'historial_montador.json');
+$('#hbo').onclick=()=>{if(confirm('¿Borrar todo el historial de este navegador?')){histSave([]);$('#hst').innerHTML=resumenHist()}};
+$('#skip').onclick=()=>{if(!CR.on)return;cancelar=true;$('#st').textContent='Saltando… (termina el paso en curso y pasa al siguiente PDF; si el paso es muy largo puede tardar unos segundos)'};
+$('#stop').onclick=()=>{if(!CR.on)return;parar=true;cancelar=true;$('#st').textContent='Parando… (termina el paso en curso)'};
 $('#go').onclick=async()=>{
+ parar=false;cancelar=false;$('#skip').hidden=false;$('#stop').hidden=false;
  $('#go').disabled=true;$('#zip').disabled=true;results=[];$('#lg').innerHTML='';$('#pg').hidden=false;$('#pg').max=files.length;$('#pg').value=0;
- Object.assign(CR,{on:true,t0:performance.now(),ok:0,err:0,tot:files.length,last:performance.now(),bloq:0,tarea:'',tt:performance.now()});pintaCR();
+ Object.assign(CR,{on:true,t0:performance.now(),ok:0,err:0,salt:0,tot:files.length,last:performance.now(),bloq:0,tarea:'',tt:performance.now()});pintaCR();mantener(true);
  for(let i=0;i<files.length;i++){const f=files[i],nombre=f.name.replace(/\.pdf$/i,''),it=add(f.name+' …',''),ri=results.length;results.push(null);
+  if(parar){it.firstChild.className='er';it.firstChild.textContent='⏭ '+f.name+': no se ha procesado (parado por el usuario)';CR.salt++;$('#pg').value=i+1;continue}
+  cancelar=false;
   CR.tf=performance.now();CR.tt=CR.tf;CR.nom=f.name;CR.tarea='Empezando';pintaCR();
   try{const r=await montar(f,$('#ug').checked,t=>{$('#st').textContent=f.name+': '+t;CR.tarea=t;CR.tt=performance.now();pintaCR()});muestra(it,nombre,r,ri);CR.ok++;
    const sm=it.querySelector('small');if(sm)sm.textContent='Tiempo: '+mmss(performance.now()-CR.tf)+'\n'+sm.textContent}
-  catch(e){it.firstChild.className='er';it.firstChild.textContent='✘ '+f.name+': '+e.message+'  (tras '+mmss(performance.now()-CR.tf)+')';console.error(e);CR.err++}
+  catch(e){const sal=/Saltado por el usuario/.test(e.message);it.firstChild.className='er';it.firstChild.textContent=(sal?'⏭ ':'✘ ')+f.name+': '+(sal?'saltado por el usuario':e.message)+'  (tras '+mmss(performance.now()-CR.tf)+')';if(sal)CR.salt++;else{console.error(e);CR.err++}histAdd({nombre,ver:VERSION,fecha:new Date().toISOString(),ms:Math.round(performance.now()-CR.tf),estado:sal?'saltado':'error',msg:sal?'':e.message})}
+  cancelar=false;
   $('#pg').value=i+1;pintaCR();await sleep()}
- CR.on=false;CR.fin=performance.now();pintaCR();
+ CR.on=false;CR.fin=performance.now();mantener(false);pintaCR();$('#skip').hidden=true;$('#stop').hidden=true;
  $('#st').textContent='Terminado en '+mmss(CR.fin-CR.t0)+'.';$('#go').disabled=false;$('#zip').disabled=!results.some(Boolean)};
-$('#zip').onclick=async()=>{const z=new JSZip();results.forEach(r=>{if(r)z.file(r.n,r.blob)});descarga(await z.generateAsync({type:'blob'}),'Areas de Influencia A3.zip')};
+$('#zip').onclick=async()=>{const z=new JSZip();results.forEach(r=>{if(r)z.file(r.n,r.blob)});descarga(await z.generateAsync({type:'blob'}),'Areas de INfluencia A3.zip')};
 (function esperarCv(){if(window.cv&&cv.Mat){$('#st').textContent='Listo. Elige los PDFs.';$('#go').disabled=!files.length}else setTimeout(esperarCv,300)})();
 </script>
 </body>
