@@ -37,6 +37,14 @@ dialog canvas{width:46vw;max-width:46vw;height:auto;border:1px solid var(--bd);b
 <div class="box">
 <div class="row"><label class="b">Elegir PDFs…<input id="fi" type="file" accept="application/pdf" multiple hidden></label><span id="nf" style="color:var(--mu)">Ningún PDF seleccionado</span></div>
 <label class="row" style="gap:8px"><input id="ug" type="checkbox" checked> Usar la vista general (página 1) como fondo, si el PDF la tiene</label>
+<label class="row" style="gap:8px">Plano guía:
+ <select id="gm" style="max-width:360px">
+  <option value="auto">Automático: busca en primera y última hoja útil</option>
+  <option value="first">Usar primera hoja útil como guía</option>
+  <option value="last">Usar última hoja útil como guía</option>
+  <option value="none">No hay guía: unir las capturas</option>
+ </select>
+</label>
 <div class="row"><button id="go" class="p" disabled>Crear PDFs A3</button><button id="zip" disabled>Descargar todo (ZIP)</button><button id="hist">📊 Historial</button><button id="skip" hidden>⏭ Saltar este PDF</button><button id="stop" hidden>⏹ Parar todo</button></div>
 <progress id="pg" value="0" max="1" hidden></progress>
 <div id="cr" hidden></div>
@@ -88,7 +96,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/p
 const PX=300/72, TRIM={t:.035,b:.065,l:0,r:.015}, MAXPX=6000;
 let files=[], results=[];
 /* ---- historial local (solo en este navegador): qué camino colocó cada página y si el resultado era bueno, para ajustar el sistema con datos reales ---- */
-const VERSION='2026-10-15c',HK='montador_historial_v1';
+const VERSION='2026-10-17e',HK='montador_historial_v1';
 function histLoad(){try{return JSON.parse(localStorage.getItem(HK)||'[]')}catch(e){return []}}
 function histSave(h){try{localStorage.setItem(HK,JSON.stringify(h.slice(-300)))}catch(e){console.warn('No se pudo guardar el historial',e)}}
 const nuevoId=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,6);
@@ -331,17 +339,25 @@ function textoIgual(TA,pa,TB,pb){const W=150,H=84,P=14,ex=(T,p,ww,hh)=>{const x=
  let ink=0;for(let i=0;i<A.data.length;i++)if(A.data[i])ink++;if(ink<250){A.delete();B.delete();return 0}
  const a2=new cv.Mat(),b2=new cv.Mat();cv.GaussianBlur(A,a2,new cv.Size(0,0),1.2);cv.GaussianBlur(B,b2,new cv.Size(0,0),1.2);
  const r=new cv.Mat();cv.matchTemplate(b2,a2,r,cv.TM_CCOEFF_NORMED);const v=cv.minMaxLoc(r).maxVal;A.delete();B.delete();a2.delete();b2.delete();r.delete();return v===v?v:0}
-/* casas que aparecen en las dos piezas: misma silueta (a otra escala) y mismo texto. Devuelve la transformación A -> B y su fiabilidad */
+/* Casas comunes: exige que varias parcelas independientes confirmen la misma transformación.
+   Una sola parcela y un rótulo repetido ya no bastan para colocar una página. */
 function casasComunes(LA,TA,LB,TB){const RA=regiones(LA),RB=regiones(LB),cand=[];
  for(const a of RA)for(const b of RB){const s0=Math.sqrt(b.area/a.area);if(s0<.25||s0>4)continue;
   if(Math.abs(a.fill-b.fill)>.07)continue;if(Math.abs(Math.log(a.ecc/b.ecc))>.14)continue;
   if(a.ecc>1.25&&b.ecc>1.25){let da=Math.abs(a.ang-b.ang);da=Math.min(da,Math.PI-da);if(da>.1)continue}
   cand.push([Math.abs(Math.log(a.ecc/b.ecc))+Math.abs(a.fill-b.fill),a,b])}
- cand.sort((x,y)=>x[0]-y[0]);let best=null;
+ cand.sort((x,y)=>x[0]-y[0]);const matches=[];
  for(const[,a,b]of cand.slice(0,60)){const MA=mascaraRegion(LA,a),MB=mascaraRegion(LB,b),q=mismaCasa(MA,MB);if(!q||q.iou<.85)continue;
   const tv=textoIgual(TA,[a.cx,a.cy],TB,[b.cx,b.cy]);if(tv<.5)continue;
-  const sc=q.iou*.6+tv*.4;if(!best||sc>best.v)best={v:sc,iou:q.iou,tv,s:q.s,x:q.x,y:q.y}}
- return best}
+  matches.push({v:q.iou*.6+tv*.4,s:q.s,x:q.x,y:q.y,a:a.id,b:b.id})}
+ if(matches.length<2)return null;
+ const tol=Math.max(18,.008*Math.hypot(LA.w,LA.h));let best=null;
+ for(const c of matches){const aa=new Set(),bb=new Set(),inl=[];
+  for(const m of matches)if(Math.abs(Math.log(m.s/c.s))<.025&&Math.hypot(m.x-c.x,m.y-c.y)<tol&&!aa.has(m.a)&&!bb.has(m.b)){aa.add(m.a);bb.add(m.b);inl.push(m)}
+  if(inl.length<2)continue;const v=inl.reduce((z,m)=>z+m.v,0)/inl.length;
+  if(!best||inl.length>best.n||(inl.length===best.n&&v>best.v)){best={n:inl.length,v,s:inl.reduce((z,m)=>z+m.s,0)/inl.length,x:inl.reduce((z,m)=>z+m.x,0)/inl.length,y:inl.reduce((z,m)=>z+m.y,0)/inl.length}}
+ }
+ return best?{v:best.v,s:best.s,x:best.x,y:best.y,coincidencias:best.n}:null}
 function liberaCC(L){if(L._cc){L._cc.lab.delete();L._cc.st.delete();L._cc.cen.delete();L._cc=null}}
 function lienzoL(L){const c=document.createElement('canvas');c.width=L.w;c.height=L.h;const g=c.getContext('2d',{willReadFrequently:true}),im=g.createImageData(L.w,L.h),D=im.data;
  for(let i=0,p=0;i<L.a.length;i++,p+=4){const v=255-L.a[i];D[p]=D[p+1]=D[p+2]=v;D[p+3]=255}g.putImageData(im,0,0);return c}
@@ -380,26 +396,43 @@ function puntuaEnGuia(Lg,Lp,T){
 const grilla=(lo,hi,paso)=>{const o=[];for(let s=lo;s<=hi;s*=paso)o.push(s);return o};
 
 /* ---------- montaje de un PDF ---------- */
-/* ¿es la página 1 una vista general? Se busca cada captura dentro de ella por plantilla; vale si alguna encaja con puntuación alta
-   y con un tamaño notable (>=12 % de la página 1): una captura enterita dentro de la página 1 es lo que hace una vista general */
-async function pareceGuia(ref,piezas,log){
- const Lr=soloLineas(ref),A=ref.width*ref.height,t0=performance.now();let ok=0;
- for(const p of piezas){if(ok>=1||performance.now()-t0>90000)break;let r=null;const lo=Math.max(.12,Math.sqrt(.10*A/(p.width*p.height))),hi=Math.max(lo*1.3,Math.sqrt(1.1*A/(p.width*p.height)));try{r=plantilla(Lr,soloLineas(p),grilla(lo,hi,1.05))}catch(e){}
-  const fr=r?(p.width*r.s)*(p.height*r.s)/A:0;
-  if(r&&r.v>=.7&&fr>=.12&&fr<=1.1)ok++;await sleep()}
- return ok>=1}
-async function montar(file,usarGeneral,log){
+/* Busca una hoja guía con evidencias de coincidencia; las áreas de detalle pueden ocupar menos del 12 % del conjunto. */
+function indiceHojaExtrema(pgs,primera){
+ const pn=primera?pgs[0].pn:pgs[pgs.length-1].pn;let ix=-1,area=-1;
+ pgs.forEach((p,i)=>{if(p.pn===pn&&p.width*p.height>area){ix=i;area=p.width*p.height}});return ix<0?(primera?0:pgs.length-1):ix}
+function evaluarMarcadores(ref,piezas){
+ const mo=marcadores(ref),mps=piezas.map(marcadores),areas=mo.map(m=>m[3]).sort((a,b)=>a-b),tol=mo.length?Math.max(2.5,.8*Math.sqrt(areas[areas.length>>1])):4,
+  ab=piezas.map((p,k)=>regM(mps[k],mo,p.width,p.height,tol)),buenas=ab.filter(a=>a&&a.s<.9&&a.n>=2),reg=buenas.length;
+ return{mo,mps,ab,reg,califica:reg>=Math.max(1,Math.ceil(piezas.length/2))||(reg>=1&&mo.length>=4),puntuacion:buenas.reduce((s,a)=>s+a.n,0)}}
+function guiaConRelleno(c){
+ const {width:w,height:h}=c,d=c.getContext('2d').getImageData(0,0,w,h).data;let color=0;
+ for(let y=0;y<h;y+=3)for(let x=0;x<w;x+=3){const p=(y*w+x)*4;if(d[p+3]<10)continue;const mx=Math.max(d[p],d[p+1],d[p+2]),mn=Math.min(d[p],d[p+1],d[p+2]);if(mn>65&&mx-mn>28&&mx<250)color++}
+ return color/Math.ceil(w/3)/Math.ceil(h/3)>.012}
+async function puntuarContenidoGuia(ref,piezas){
+ const Lr=soloLineas(ref),A=ref.width*ref.height,relleno=guiaConRelleno(ref),t0=performance.now();let mejor=0,frMejor=0,acum=0,coinciden=0;
+ for(const p of piezas){if(performance.now()-t0>14000)break;let r=null;const frMin=.004,lo=Math.max(.08,Math.sqrt(frMin*A/(p.width*p.height))),hi=Math.max(lo*1.2,Math.sqrt(1.1*A/(p.width*p.height)));try{r=plantilla(Lr,soloLineas(p),grilla(lo,hi,1.07))}catch(e){}
+  const fr=r?(p.width*r.s)*(p.height*r.s)/A:0;if(r){if(r.v>mejor){mejor=r.v;frMejor=fr}if(r.v>=.63&&fr>=frMin&&fr<=1.1){coinciden++;acum+=r.v}}await sleep()}
+ /* Una hoja aislada puede parecerse por casualidad a un fragmento. Auto exige dos encajes independientes o uno excepcionalmente fuerte y amplio. */
+ return{ok:(coinciden>=2&&mejor>=.68&&acum>=1.35)||(mejor>=.88&&frMejor>=.05),mejor,frMejor,coinciden,puntuacion:acum,relleno}}
+async function montar(file,usarGeneral,log,modoGuia='auto'){
  let pgs=await paginas(file);if(pgs.length<2)throw new Error('El PDF necesita al menos 2 páginas de plano (las hojas de registro de calles u otras tablas se ignoran).');
  const omit=pgs.omitidas||0;if(omit)log(`(se ${omit===1?'ignora 1 página que no es plano':'ignoran '+omit+' páginas que no son plano'})`);
- let ref=pgs[0],piezas=pgs.slice(1),n=piezas.length;
- log('Detectando marcadores…');await sleep();
- const mo=marcadores(ref);let mps=piezas.map(marcadores);
- const areas=mo.map(m=>m[3]).sort((a,b)=>a-b),TOL=mo.length?Math.max(2.5,.8*Math.sqrt(areas[areas.length>>1])):4;
- let ab=piezas.map((p,k)=>regM(mps[k],mo,p.width,p.height,TOL));
- const reg=ab.filter(a=>a&&a.s<.9&&a.n>=2).length;let sinG=!(reg>=Math.max(1,Math.ceil(n/2))||(reg>=1&&mo.length>=4));let guiaPor=sinG?'no':'marcadores';
- /* los marcadores no bastan (hay planos cuyas capturas casi no los traen): se mira si las demás páginas encajan DENTRO de la página 1 */
- if(sinG&&n>=2){log('Comprobando si la página 1 es el plano guía…');await sleep();if(await pareceGuia(ref,piezas,log)){sinG=false;guiaPor='contenido';log('(la página 1 es la vista general: las demás capturas encajan dentro de ella)')}}
- if(sinG){piezas=pgs;n=pgs.length;ref=null;usarGeneral=false;mps=piezas.map(marcadores);ab=piezas.map(()=>null);log('(sin vista general: se montan todas las páginas como piezas)')}
+ const ixPrimera=indiceHojaExtrema(pgs,true),ixUltima=indiceHojaExtrema(pgs,false),candidatos=new Set(pgs.map(p=>p.pn)).size>=2?[...new Set([ixPrimera,ixUltima])]:[];let ixGuia=-1,guiaPor='no',ev=null;
+ if(modoGuia==='first'||modoGuia==='last'){
+  ixGuia=modoGuia==='first'?ixPrimera:ixUltima;guiaPor=modoGuia==='first'?'forzada primera hoja':'forzada última hoja';
+ }else if(modoGuia!=='none'){
+  log('Buscando una hoja guía entre la primera y la última…');await sleep();let mejor=null;
+  for(const ix of candidatos){const ref0=pgs[ix],pp=pgs.filter((_,i)=>i!==ix);if(!pp.length)continue;const e=evaluarMarcadores(ref0,pp);if(e.califica&&(!mejor||e.puntuacion>mejor.ev.puntuacion))mejor={ix,ev:e,tipo:'marcadores'}}
+  if(mejor){ixGuia=mejor.ix;ev=mejor.ev;guiaPor=`marcadores (${ixGuia===ixPrimera?'primera':'última'} hoja)`}
+  else{let mejorC=null;for(const ix of candidatos){const ref0=pgs[ix],pp=pgs.filter((_,i)=>i!==ix);if(!pp.length)continue;log(`Comparando contenido de la ${ix===ixPrimera?'primera':'última'} hoja útil…`);const q=await puntuarContenidoGuia(ref0,pp);if(q.ok&&(!mejorC||q.puntuacion>mejorC.q.puntuacion))mejorC={ix,q}}
+   if(mejorC){ixGuia=mejorC.ix;guiaPor=`contenido (${ixGuia===ixPrimera?'primera':'última'} hoja; ${mejorC.q.coinciden} coincidencias)`}}
+ }
+ let ref=ixGuia>=0?pgs[ixGuia]:null,piezas=ixGuia>=0?pgs.filter((_,i)=>i!==ixGuia):pgs.slice(),n=piezas.length;
+ let mo=ref?marcadores(ref):[],mps=piezas.map(marcadores),areas=mo.map(m=>m[3]).sort((a,b)=>a-b),TOL=mo.length?Math.max(2.5,.8*Math.sqrt(areas[areas.length>>1])):4,
+  ab=ixGuia>=0?(ev?.ab||piezas.map((p,k)=>regM(mps[k],mo,p.width,p.height,TOL))):piezas.map(()=>null),sinG=ixGuia<0;
+ if(modoGuia==='first'||modoGuia==='last'){sinG=false;log(`(se usa la ${modoGuia==='first'?'primera':'última'} hoja útil como guía por selección)`)}
+ if(sinG){usarGeneral=false;log('(no se encontró una guía con evidencia suficiente: se montan todas las páginas como piezas)')}
+ else log(`(hoja guía detectada: ${guiaPor})`);
  log('Buscando coincidencias entre capturas…');await sleep();
  const ft=[];for(const p of piezas){ft.push(rasgos(p));await sleep()}
  const edges=[];
@@ -520,8 +553,10 @@ async function montar(file,usarGeneral,log){
  const ok=[...Array(n).keys()].filter(k=>TR[k]),inf=[];
  for(let k=0;k<n;k++){const e=piezas[k].pn+(piezas[k].nsub>1?` (parte ${piezas[k].sub})`:'');
   inf.push(!TR[k]?`página ${e}: NO se ha podido ubicar; se añade al final como página aparte`:como[k]?`página ${e}: colocada por ${como[k]} (conviene revisarla)`:ab[k]?`página ${e}: ${ab[k].n} marcadores coinciden`:`página ${e}: colocada por enlace con otra pieza${sinG?'':' (conviene revisarla)'}`)}
- if(ok.length<Math.min(n,Math.max(2,Math.ceil(n/3))))throw new Error(`No se pudo montar: solo se han podido ubicar ${ok.length} de ${n} páginas (¿son fotos, escaneos o formularios en vez de capturas?).`);
- /* lienzo: se puede recomponer si el usuario coloca a mano alguna página suelta */
+ // Con dos piezas, permite guardar una salida marcada como parcial si la otra queda para colocación manual.
+ if(ok.length<Math.min(n,Math.max(n===2?1:2,Math.ceil(n/3)))){
+  const parcial={guia:guiaPor,n,piezas:piezas.map((p,k)=>{const T=TR[k],m=como[k]&&como[k].match(/\d\.\d\d/);return{pn:p.pn,sub:p.nsub>1?p.sub:0,camino:!T?'sin ubicar':como[k]?(como[k].startsWith('casa común')?'casa común con pieza':como[k].startsWith('solo líneas')?'solo líneas':'plantilla'):ab[k]?'marcadores':'enlace',punt:m?+m[0]:undefined,marc:ab[k]?ab[k].n:undefined,s:T?+T.s.toFixed(3):undefined,w:p.width,h:p.height,fallo:!T?(rz[k]?Object.entries(rz[k]).map(([e,o])=>e+' '+o.v).join(', '):'ningún método llegó a puntuar'):undefined}})};
+  const er=new Error(`No se pudo montar: solo se han podido ubicar ${ok.length} de ${n} páginas (¿son fotos, escaneos o formularios en vez de capturas?).`);er.diag=parcial;throw er} /* lienzo: se puede recomponer si el usuario coloca a mano alguna página suelta */
  const manual={},bb=c=>c._bb||(c._bb=cajaTinta(c));let refHi=null;
  const componer=()=>{
   const TRx=TR.map((t,k)=>manual[k]||t),ok=[...Array(n).keys()].filter(k=>TRx[k]);
@@ -566,7 +601,7 @@ function a3(canvas,titulo,nota,extras){
   if(nueva)pdf.addPage('a3',vert?'p':'l');
   pdf.setFontSize(16);pdf.text(txt,mg,mg+5);
   const aw=PW-2*mg,ah=PH-2*mg-cab,k=Math.min(aw/cv2.width,ah/cv2.height),w=cv2.width*k,h=cv2.height*k;
-  pdf.addImage(cv2.toDataURL('image/jpeg',.93),'JPEG',mg+(aw-w)/2,mg+cab+(ah-h)/2,w,h)};
+  const blanco=document.createElement('canvas');blanco.width=cv2.width;blanco.height=cv2.height;const gb=blanco.getContext('2d');gb.fillStyle='#fff';gb.fillRect(0,0,blanco.width,blanco.height);gb.drawImage(cv2,0,0);pdf.addImage(blanco.toDataURL('image/jpeg',.93),'JPEG',mg+(aw-w)/2,mg+cab+(ah-h)/2,w,h)};
  pagina(canvas,titulo+(nota?'   '+nota:''),false);
  for(const x of (extras||[]))pagina(x.c,titulo+'   (página '+x.pn+' del original, sin ubicar en el plano)',true);
  return pdf.output('blob')}
@@ -575,7 +610,9 @@ function a3(canvas,titulo,nota,extras){
 function add(txt,cls,sub){const d=document.createElement('div');d.className='it';d.innerHTML=`<span class="${cls||''}"></span><small></small>`;
  d.firstChild.textContent=txt;d.lastChild.textContent=sub||'';$('#lg').appendChild(d);$('#lg').hidden=false;return d}
 function descarga(blob,nombre){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=nombre;a.click()}
-$('#fi').onchange=e=>{files=[...e.target.files];$('#nf').textContent=files.length+' PDF seleccionados';$('#go').disabled=!window.cv||!cv.Mat||!files.length};
+const esSalidaA3=f=>/_A3(?:\s*\(\d+\))?\.pdf$/i.test(f.name);
+function actualizaEntrada(){const tieneSalida=files.some(esSalidaA3),listo=!!(window.cv&&cv.Mat);$('#go').disabled=!listo||!files.length||tieneSalida;if(tieneSalida)$('#st').textContent='Has seleccionado un resultado _A3.pdf del montador. Elige los PDFs originales para volver a montar.';else if(listo)$('#st').textContent='Listo. Elige los PDFs.'}
+$('#fi').onchange=e=>{files=[...e.target.files];$('#nf').textContent=files.length+' PDF seleccionados';actualizaEntrada()};
 function muestra(it,nombre,r,ri){
  const blob=a3(r.canvas,nombre,r.sin?`(${r.sin} página(s) sin ubicar: van al final)`:'',r.extras);const idPrev=results[ri]&&results[ri].id;results[ri]={n:nombre+'_A3.pdf',blob,id:idPrev};
  let ent=idPrev?histUpd(idPrev,e=>Object.assign(e,{n:r.diag.n,guia:r.diag.guia,piezas:r.diag.piezas,corregido:true})):null;
@@ -648,15 +685,18 @@ $('#go').onclick=async()=>{
   if(parar){it.firstChild.className='er';it.firstChild.textContent='⏭ '+f.name+': no se ha procesado (parado por el usuario)';CR.salt++;$('#pg').value=i+1;continue}
   cancelar=false;
   CR.tf=performance.now();CR.tt=CR.tf;CR.nom=f.name;CR.tarea='Empezando';pintaCR();
-  try{const r=await montar(f,$('#ug').checked,t=>{$('#st').textContent=f.name+': '+t;CR.tarea=t;CR.tt=performance.now();pintaCR()});muestra(it,nombre,r,ri);CR.ok++;
+  try{const r=await montar(f,$('#ug').checked,t=>{$('#st').textContent=f.name+': '+t;CR.tarea=t;CR.tt=performance.now();pintaCR()},$('#gm').value);muestra(it,nombre,r,ri);CR.ok++;
    const sm=it.querySelector('small');if(sm)sm.textContent='Tiempo: '+mmss(performance.now()-CR.tf)+'\n'+sm.textContent}
-  catch(e){const sal=/Saltado por el usuario/.test(e.message);it.firstChild.className='er';it.firstChild.textContent=(sal?'⏭ ':'✘ ')+f.name+': '+(sal?'saltado por el usuario':e.message)+'  (tras '+mmss(performance.now()-CR.tf)+')';if(sal)CR.salt++;else{console.error(e);CR.err++}histAdd({nombre,ver:VERSION,fecha:new Date().toISOString(),ms:Math.round(performance.now()-CR.tf),estado:sal?'saltado':'error',msg:sal?'':e.message})}
+  catch(e){const sal=/Saltado por el usuario/.test(e.message);it.firstChild.className='er';it.firstChild.textContent=(sal?'⏭ ':'✘ ')+f.name+': '+(sal?'saltado por el usuario':e.message)+'  (tras '+mmss(performance.now()-CR.tf)+')';if(sal)CR.salt++;else{console.error(e);CR.err++}histAdd({nombre,ver:VERSION,fecha:new Date().toISOString(),ms:Math.round(performance.now()-CR.tf),estado:sal?'saltado':'error',msg:sal?'':e.message,...(e.diag||{})})}
   cancelar=false;
   $('#pg').value=i+1;pintaCR();await sleep()}
  CR.on=false;CR.fin=performance.now();mantener(false);pintaCR();$('#skip').hidden=true;$('#stop').hidden=true;
  $('#st').textContent='Terminado en '+mmss(CR.fin-CR.t0)+'.';$('#go').disabled=false;$('#zip').disabled=!results.some(Boolean)};
 $('#zip').onclick=async()=>{const z=new JSZip();results.forEach(r=>{if(r)z.file(r.n,r.blob)});descarga(await z.generateAsync({type:'blob'}),'Areas de INfluencia A3.zip')};
-(function esperarCv(){if(window.cv&&cv.Mat){$('#st').textContent='Listo. Elige los PDFs.';$('#go').disabled=!files.length}else setTimeout(esperarCv,300)})();
+(function esperarCv(){if(window.cv&&cv.Mat){actualizaEntrada()}else setTimeout(esperarCv,300)})();
 </script>
 </body>
 </html>
+
+
+
